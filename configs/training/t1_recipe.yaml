@@ -1,0 +1,58 @@
+# T1 训练配方 —— 只做训推一致化（翻拍增强消融组）
+#
+# 用途：作为 T2 的**消融对照**，证明翻拍增强那 +11.21 pt（E2b）确实来自增强本身，
+#       而不是别的东西。交付默认用 t2_recipe.yaml，不要用本配方。
+#
+# 两个配方的差异**只有一行**：build.align.mode
+#   t1: pipeline（只一致化）
+#   t2: photo   （一致化 + 翻拍增强）
+# 其余全同 —— 这是受控实验的要求。
+
+name: t1-pipe
+version: 1
+
+seed: 0
+
+build:
+  source: data/datasets/converted/steel-tube-7cls
+  output: data/datasets/converted/steel-tube-7cls-pipe
+
+  align:
+    mode: pipeline                    # ← 与 T2 的唯一差异
+    expect_product_config: backend/configs/default.yaml
+    expect:
+      bilateral_d: 9
+      bilateral_sigma_color: 75.0
+      bilateral_sigma_space: 75.0
+      median_k: 3
+      clahe_clip: 2.0
+      clahe_grid: 8
+      gamma: 1.0
+
+  # pipeline 模式下不生效（保留字段以保持两份配方结构一致，便于 diff）
+  photo:
+    strength: 0.0
+    jitter: 0.0
+    train_seed: 0
+
+  proxy_domains: {}                   # 代理域由 t2_recipe 负责生成，此处不重复
+
+train:
+  model: models/pretrained/yolo11n.pt  # 本地权重；解析失败会 FATAL 并给出下载命令
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  workers: 4
+  patience: 30
+  device: 0
+  deterministic: true
+  amp: true
+
+eval:
+  domains:
+    E0: data/datasets/converted/steel-tube-7cls/data.yaml
+    E1: data/datasets/converted/steel-tube-7cls-pipe/data.yaml
+
+expected:
+  E1_mAP50: 0.9713
+  tolerance: 0.005

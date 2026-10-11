@@ -1,0 +1,22 @@
+"""标准数值表数据源端口。
+
+领域层只声明"需要按 standard_id 取一张标准表"，不关心表从何而来
+（本地 YAML / 数据库 / 云端）。具体实现（`FileTableSource` 等）由基础设施层提供，
+经 DI 注入；生产环境 domain 因此完全不接触文件系统。
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:  # 仅类型检查用，避免与 loader 运行时循环导入
+    from backend.domain.standards.tables.loader import StandardTables
+
+
+@runtime_checkable
+class TableSource(Protocol):
+    """标准数值表数据源（模型无关， 同构）。"""
+
+    def load(self, standard_id: str, filename: str | None = None) -> StandardTables:
+        """加载并校验标准数值表；文件缺失/结构不符抛错（启动即失败）。"""
+        ...

@@ -1,0 +1,76 @@
+# T3 训练配方 —— T2 数据集 + 合成的「未焊透 / 内凹」
+#
+# ## 目的（不是"提升精度"，而是"补类别槽位"）
+#
+# 公开数据里 **未焊透 = 0、内凹 = 0 实例**。不补的话，重训出来的模型在分类头上
+# 不可能输出这两类 —— 而产品模型在真实底片上 76% 的检出是「未焊透」
+# （见 runs/eval-cross/CROSS_DOMAIN_REPORT.md §4.8）。
+#
+# T3 要回答的是**一个受控问题**：
+#   「把合成的长尾类塞进训练集，会不会损害已有 5 类的性能？」
+# 如果损害 → 合成方案不可用（诚实结论）；如果不损害 → 至少拿到了类别槽位。
+#
+# ## 数据集从哪来
+#
+# 图片由 `scripts/synth_root_defects.py` 产出（在 T2 数据集之上沿焊缝方向叠加合成缺陷）。
+# 本配方用 `align.mode: copy` —— 不再改像素，只做护栏 / 指纹 / 训练 / 评估 / 锁文件。
+#
+# ## 前置命令
+#
+# ```bash
+# python scripts/synth_root_defects.py --config configs/synthesis/root_defects.yaml
+# python scripts/train_recipe.py --recipe configs/training/t3_synth_recipe.yaml
+# ```
+
+name: t3-photo-root
+version: 1
+
+seed: 0
+
+build:
+  # 源 = T2 数据集（已训推一致化 + 翻拍增强）
+  source: data/datasets/converted/steel-tube-7cls-photo
+  # 输出 = 已由 synth_root_defects.py 建好的合成集
+  output: data/datasets/converted/steel-tube-7cls-photo-root
+
+  align:
+    mode: verify                      # 数据集已由 synth 脚本产出，只校验不改动
+    expect_product_config: backend/configs/default.yaml
+    expect:                           # 仍然校验：产品预处理没变，合成集才仍与推理同分布
+      bilateral_d: 9
+      bilateral_sigma_color: 75.0
+      bilateral_sigma_space: 75.0
+      median_k: 3
+      clahe_clip: 2.0
+      clahe_grid: 8
+      gamma: 1.0
+
+  photo:
+    strength: 0.0
+    jitter: 0.0
+    train_seed: 0
+
+  proxy_domains: {}                   # 代理域复用 T2 配方产出的，不重建
+
+train:
+  model: models/pretrained/yolo11n.pt
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  workers: 4
+  patience: 30
+  device: 0
+  deterministic: true
+  amp: true
+
+eval:
+  domains:
+    E0: data/datasets/converted/steel-tube-7cls/data.yaml
+    E1: data/datasets/converted/steel-tube-7cls-pipe/data.yaml
+    E2: data/eval/steel-tube-photo/data.yaml
+    E2b: data/eval/steel-tube-photo-hard/data.yaml
+
+# 期望值留空：T3 是一次**探索性**实验，事先不知道结果。
+# 跑完用人眼审 → 确认合理后，再把数字回填到这里作为后续回归基准。
+expected:
+  tolerance: 0.005

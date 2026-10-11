@@ -1,0 +1,88 @@
+# T2 训练配方 —— 训推一致化 + 翻拍增强
+#
+# 为什么是这个配方（结论来源 runs/eval-cross/CROSS_DOMAIN_REPORT.md）：
+#   1. 产品推理输入是「预处理后」的分布（film_background_fill → bilateral+median → CLAHE）。
+#      训练若喂原图，产品真实输入域 E1 掉 −24.99 pt（recall 0.9405→0.5946）→ T0 不可交付。
+#   2. 训推一致化（T1）在 E1 捡回 +25.88 pt。
+#   3. 再叠加翻拍增强（T2）在 E1 不付代价（−0.08 pt，噪声内），却把
+#      E2 +2.82 pt、E2b +11.21 pt，并修回 T1 在 E0 的掉点 +10.60 pt。
+#   ⇒ **T2 是当前唯一"白捡"的增益，固化为默认训练链路。**
+#
+# 纪律：
+#   - preprocess 参数**不在此硬编码**，运行时从 backend/configs/default.yaml 读取并断言，
+#     防止产品改了预处理而训练集没跟着改（训推不一致是本项目第一大坑）。
+#   - 产出数据集带 sha256 指纹，写入 <out>/dataset_fingerprint.json，用于复现校验。
+
+name: t2-photo
+version: 1
+
+seed: 0
+
+# ── 数据构建 ───────────────────────────────────────────────────────────
+build:
+  # 源：已完成 7 类重映射的干净源集（原图域）
+  source: data/datasets/converted/steel-tube-7cls
+  # 输出：T2 数据集
+  output: data/datasets/converted/steel-tube-7cls-photo
+
+  # 训推一致化：参数从产品配置读，这里是**期望值**，不一致则 FATAL
+  align:
+    mode: photo                       # pipeline=只一致化；photo=一致化+翻拍增强
+    expect_product_config: backend/configs/default.yaml
+    expect:
+      bilateral_d: 9
+      bilateral_sigma_color: 75.0
+      bilateral_sigma_space: 75.0
+      median_k: 3
+      clahe_clip: 2.0
+      clahe_grid: 8
+      gamma: 1.0
+
+  # 翻拍模拟强度（依据 data/datasets/_domain_ref/ 两张真实翻拍样本标定）
+  # train 带强度抖动（增强多样性）；val 用固定强度（自评必须确定性）
+  photo:
+    strength: 0.5
+    jitter: 0.25
+    train_seed: 0
+
+  # 代理评估域 E2/E2b：固定强度 + 固定 seed，保证可复现
+  proxy_domains:
+    E2:
+      output: data/eval/steel-tube-photo
+      strength: 0.6
+      seed: 0
+    E2b:
+      output: data/eval/steel-tube-photo-hard
+      strength: 1.0
+      seed: 0
+
+# ── 训练 ──────────────────────────────────────────────────────────────
+train:
+  model: models/pretrained/yolo11n.pt  # 本地权重；解析失败会 FATAL 并给出下载命令
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  workers: 4
+  patience: 30
+  device: 0
+  deterministic: true
+  amp: true
+
+# ── 评估域（跨域矩阵的列） ─────────────────────────────────────────────
+eval:
+  domains:
+    E0: data/datasets/converted/steel-tube-7cls/data.yaml
+    E1: data/datasets/converted/steel-tube-7cls-pipe/data.yaml
+    E2: data/eval/steel-tube-photo/data.yaml
+    E2b: data/eval/steel-tube-photo-hard/data.yaml
+
+# ── 复现护栏：本次记录值，偏差超容差即报警 ──────────────────────────────
+# 参照值 = 配方首次全量跑（runs/recipe/t2-photo, 2026-10-11）的产物基准。
+# 注意：不是旧临时构建的值（那个不可复现）；改 build 参数后必须重定基准。
+expected:
+  self_val_mAP50: 0.9798
+  self_val_mAP50_95: 0.6296
+  E0_mAP50: 0.8991
+  E1_mAP50: 0.9743
+  E2b_mAP50: 0.9278
+  tolerance: 0.005

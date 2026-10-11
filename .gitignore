@@ -1,0 +1,27 @@
+node_modules/
+dist/
+dist-recovery-test/
+backend-src.tar.gz
+.asar_extracted/
+__pycache__/
+venv/
+python_embed/
+
+# --- 运行时产物 / 敏感数据（2026-10-12 敏感扫描后补充）---
+data/
+logs/
+runs/
+models/
+*.db
+*.db-shm
+*.db-wal
+ipc_token
+.env.local
+.env.*.local
+*.pem
+*.key
+.vite/
+node_modules/
+python_embed/
+dist/
+*.pt

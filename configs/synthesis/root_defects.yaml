@@ -1,0 +1,44 @@
+# 合成长尾类缺陷（未焊透 / 内凹）参数
+#
+# ⚠️ 参数状态：**未经真实标注底片标定**
+#    当前值是"文献比例 + 本项目图像尺度"的估计，用于让重训模型保留类别槽位。
+#    拿到真实底片标注后，只需改本文件重跑，无需改代码。
+#
+# 形态依据（见 scripts/synth_root_defects.py 顶部引文表）：
+#   未焊透 = 细直黑线、两侧轮廓整齐、位于焊缝根中部、可断续可连续、黑度均匀轮廓清晰
+#   内凹   = 焊缝根部不规则、边缘模糊的黑影，中部黑度较大、向边缘渐淡
+
+title: 合成根部缺陷（未焊透 / 内凹）
+
+# 源：用 T2 数据集（已训推一致化 + 翻拍增强），保证合成图与训练分布一致
+source: data/datasets/converted/steel-tube-7cls-photo
+output: data/datasets/converted/steel-tube-7cls-photo-root
+
+seed: 0
+fraction: 0.35      # 对 35% 的图合成
+per_image: 1        # 每图 1 个
+
+classes:
+  未焊透:            # id 必须与 backend/domain/dto.py 的 DefectClass 一致（脚本会断言）
+    id: 2
+    profile: line    # 矩形截面（锐边）
+    # 线宽 / 焊缝带厚。依据："未焊透影像宽度恰好是钝边间隙的宽度"，
+    # 而钝边间隙一般 1.5–3 mm、熔宽 12–18 mm → 比值约 8–20%。
+    # 实测本项目底片的焊缝带厚中位 99 px，故 0.08–0.16 → 约 8–16 px。
+    width_frac: [0.08, 0.16]
+    min_thickness_px: 3         # 绝对下限：低于 ~3 px 模型学不到任何东西
+    length_frac: [0.15, 0.65]   # 线长 / 图宽 —— 可贯穿
+    darken: [40, 95]            # 灰阶增量
+    dash_prob: 0.5              # 断续概率（文献："有连续和断续之分"）
+    edge_soft: 0.7              # px，边缘锐利 → 轮廓清晰
+
+  内凹:
+    id: 6
+    profile: band    # 余弦截面（中部最大、向边缘渐淡）
+    # 内凹是根部"低洼坑"，暗影明显宽于未焊透
+    width_frac: [0.25, 0.50]
+    min_thickness_px: 6
+    length_frac: [0.25, 0.75]
+    darken: [25, 60]
+    dash_prob: 0.05             # 内凹一般连续
+    edge_soft: 6.0              # px，"边缘模糊"

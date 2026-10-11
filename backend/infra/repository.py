@@ -909,7 +909,7 @@ def _parse_dt(raw: str) -> datetime:
     except ValueError:
         pass
     try:
-        return datetime.strptime(s[:10], "%Y-%m-%d")  # noqa: DTZ007 - 仅作日期区间过滤，无需时区
+        return datetime.strptime(s[:10], "%Y-%m-%d")
     except ValueError as e:
         raise ValueError(f"invalid date: {raw!r}, expected YYYY-MM-DD or ISO-8601") from e
 

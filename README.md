@@ -41,6 +41,14 @@ curl http://127.0.0.1:18773/api/v1/health
 | `scripts/` | 数据转换/训练/跨域评估/底片入库工具 |
 | `docs/` | MODEL_CARD / TRAINING_RECIPE / REAL_FILM_COLLECTION |
 
+## 质量门禁
+
+push 前自动执行三关（`.git/hooks/pre-push` → `scripts/quality_gate.sh`）：
+
+1. **ruff**：lint 清零（规则集锁定于 `ruff.toml`）
+2. **import-linter**：分层契约（`app → infra → domain` 单向；domain 零外部依赖）
+3. **pytest**：冒烟测试
+
 ## 纪律
 
 - `data/`（底片、数据库、令牌）、`runs/`、`models/` 均不入 git——见 `.gitignore`

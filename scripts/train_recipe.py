@@ -28,7 +28,6 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -290,7 +289,7 @@ def stage_train(recipe: dict, build_info: dict, run_root: Path) -> dict:
     from ultralytics import YOLO
 
     model = YOLO(str(weights))
-    res = model.train(
+    model.train(
         data=str(data_yaml), epochs=int(t["epochs"]), imgsz=int(t["imgsz"]),
         batch=int(t["batch"]), workers=int(t["workers"]), patience=int(t["patience"]),
         device=t["device"], seed=int(recipe["seed"]), deterministic=bool(t["deterministic"]),

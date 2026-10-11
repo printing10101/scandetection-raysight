@@ -69,7 +69,7 @@ def preflight(data_yaml: Path, model: Path) -> None:
     if img is None:
         sys.exit(f"[FATAL] 无法读取图片（疑似中文路径问题）: {first}")
     print(f"[preflight] 图片读取 OK: shape={img.shape}  cv2={cv2.__version__}")
-    print(f"[preflight] GPU: ", end="")
+    print("[preflight] GPU: ", end="")
     import torch
 
     print(f"{torch.cuda.get_device_name(0)}  cuda={torch.cuda.is_available()}")
@@ -80,8 +80,8 @@ def main() -> None:
     data_yaml = Path(args.data)
     model = Path(args.model)
 
-    import torch
     import matplotlib
+    import torch
 
     # 让 PR 曲线/混淆矩阵里的中文类名正常显示（否则是方块）
     matplotlib.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]

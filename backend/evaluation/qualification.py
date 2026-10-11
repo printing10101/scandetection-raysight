@@ -56,7 +56,7 @@ class Personnel:
         if not self.valid_until:
             return False
         try:
-            return date.fromisoformat(self.valid_until) < date.today()  # noqa: DTZ011 — 本地时区语义即所需
+            return date.fromisoformat(self.valid_until) < date.today()
         except ValueError:
             return True  # 日期格式非法按过期处理
 

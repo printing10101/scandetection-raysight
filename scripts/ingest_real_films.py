@@ -115,7 +115,6 @@ def film_stats(g: np.ndarray) -> dict:
         g[:band, :].ravel(), g[-band:, :].ravel(),
         g[:, :band].ravel(), g[:, -band:].ravel(),
     ])
-    f = g.astype(np.float32)
     return {
         "shape": [int(H), int(W)],
         "mean": round(float(g.mean()), 2),

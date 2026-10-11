@@ -83,7 +83,7 @@ def build_record(
             "developer": developer,
             "contact": contact,
             "address": address,
-            "eval_date": date.today().isoformat(),  # noqa: DTZ011 — 记录表用本地日期
+            "eval_date": date.today().isoformat(),
             "operator": operator,
         },
         "film": {

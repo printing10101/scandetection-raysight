@@ -35,7 +35,7 @@ import argparse
 import random
 import shutil
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 # ---------------------------------------------------------------- 配置
@@ -246,13 +246,13 @@ def main() -> int:
 
         print(f"\n[{src_split} -> {out_split}]")
         print(f"  原始: {len(items)} 图 / {src_boxes} 框")
-        print(f"  原始类分布: " + ", ".join(
+        print("  原始类分布: " + ", ".join(
             f"{STEEL_NAMES.get(k, k)}={v}" for k, v in sorted(raw_box_class.items())))
         print(f"  过滤后(映射完成): {stat['kept_img']} 图 / {sum(before.values())} 框"
               f" | 含未映射类丢弃 {stat['dropped_partial_img']} 图"
               f" | 空标注丢弃 {stat['empty_label']} 图")
         if dropped:
-            print(f"  被丢弃的未映射框: " + ", ".join(
+            print("  被丢弃的未映射框: " + ", ".join(
                 f"{STEEL_NAMES.get(k, k)}={v}" for k, v in sorted(dropped.items())))
         if ds_info:
             print(f"  气孔降采样: cap={ds_info['cap']} 混合图内气孔={ds_info['pore_in_mixed']}"

@@ -169,7 +169,7 @@ def _check_ports(reg) -> list[dict[str, str]]:
             )
         )
     else:
-        bad = [l for l in listeners if not _is_loopback(str(l["addr"]))]
+        bad = [li for li in listeners if not _is_loopback(str(li["addr"]))]
         if bad:
             items.append(
                 _finding(

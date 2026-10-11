@@ -1,0 +1,20 @@
+[importlinter]
+root_package = backend
+
+[importlinter:contract:layers]
+name = DDD 分层单向依赖（app → infra → domain；domain 为纯领域层，禁止反向依赖）
+type = layers
+layers =
+    backend.app
+    backend.infra
+    backend.domain
+
+[importlinter:contract:domain-purity]
+name = domain 禁止依赖 app / infra / evaluation（领域层零外部依赖）
+type = forbidden
+source_modules =
+    backend.domain
+forbidden_modules =
+    backend.app
+    backend.infra
+    backend.evaluation

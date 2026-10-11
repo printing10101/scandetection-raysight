@@ -166,8 +166,8 @@ def main() -> int:
     print(f"[INFO] 真实底片 {len(imgs)} 张: {[p.name for p in imgs]}")
 
     prep = build_preprocessor()
-    from ultralytics import YOLO
     import onnxruntime as ort
+    from ultralytics import YOLO
 
     pt_models = {}
     for tag in ("T0", "T1", "T2"):

@@ -25,7 +25,14 @@ from backend.domain.active_learning import (
 )
 from backend.domain.density import check_density, estimate_density
 from backend.domain.detect.thresholds import resolve_class_conf
-from backend.domain.dto import BBox, DefectClass, DefectShape, Detection, ImageMeta, Modality
+from backend.domain.dto import (
+    BBox,
+    DefectClass,
+    DefectShape,
+    Detection,
+    ImageMeta,
+    Modality,
+)
 from backend.domain.errors import GradingAmbiguousError, IQIFailError
 from backend.domain.film_region import FilmRegionCfg as DomainFilmRegionCfg
 from backend.domain.film_region import detect_film_region_trusted, film_background_fill
@@ -37,7 +44,9 @@ from backend.domain.pseudo_defect import screen_pseudo_defects
 from backend.domain.quantify import MaskRefineCfg, get_quantifier
 from backend.domain.recommend import recommend
 from backend.domain.review import ReviewDecision, ReviewRole, resolve_review
-from backend.domain.spacing import resolve_spacing as _resolve_spacing  # 单一真源（§T8/§6）
+from backend.domain.spacing import (
+    resolve_spacing as _resolve_spacing,  # 单一真源（§T8/§6）
+)
 from backend.domain.stamp import (
     StampCfg,
     extract_film_no,

@@ -30,11 +30,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from collections import Counter
 from pathlib import Path
 
-import numpy as np
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]

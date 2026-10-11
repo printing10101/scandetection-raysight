@@ -21,9 +21,17 @@ from backend.domain.errors import ModelUnavailableError
 from backend.domain.grade.registry import get_grader
 from backend.domain.interfaces import DefectDetector, Reporter, StandardGrader
 from backend.domain.preprocess.pipeline import OpencvPreprocessor
-from backend.domain.standards.tables.loader import load_standard_tables, set_default_table_source
+from backend.domain.standards.tables.loader import (
+    load_standard_tables,
+    set_default_table_source,
+)
 from backend.domain.sync import LocalAdapter
-from backend.infra.config import AppConfig, ensure_runtime_dirs, load_config, resolve_config_path
+from backend.infra.config import (
+    AppConfig,
+    ensure_runtime_dirs,
+    load_config,
+    resolve_config_path,
+)
 from backend.infra.model_registry import ModelEntry, ModelRegistry
 from backend.infra.model_store import LocalModelStore
 from backend.infra.paths import resolve_model_uri as _resolve_model_uri
@@ -275,7 +283,9 @@ class Registry:
         if self._gate_reject_store is None:
             with self._lazy_store_lock:
                 if self._gate_reject_store is None:
-                    from backend.evaluation.gate_rejects import GateRejectStore as _Store
+                    from backend.evaluation.gate_rejects import (
+                        GateRejectStore as _Store,
+                    )
 
                     self._gate_reject_store = _Store(str(_resolve_path(self.config.paths.db_path)))
         return self._gate_reject_store

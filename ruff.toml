@@ -1,0 +1,26 @@
+# ruff 配置：锁定当前干净基线，防止退化
+# 注意：不启用 ruff format 强制（136 文件会全量重排，噪音 diff），
+# 只 gate 语义类问题。新增规则须先跑全仓确认清零再入册。
+target-version = "py312"
+line-length = 120
+
+[lint]
+select = [
+    "E4",   # pycodestyle import/statement errors
+    "E7",   # pycodestyle statement errors
+    "E9",   # pycodestyle runtime errors
+    "F",    # pyflakes（未用变量/未定义名/f-string 问题）
+    "I",    # isort 导入排序
+    "W",    # pycodestyle warnings
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["E501"]
+# 工具脚本：sys.path 引导式导入 + 紧凑写法属常态，不强制风格
+"scripts/*" = ["E402", "E741", "E702", "E731"]
+# evaluation harness：sys.path 引导 + lambda 速写（遗留，改造收益低）
+"backend/evaluation/*" = ["E402", "E731"]
+# config 底部的安装根锚点导入是有意的（注释已说明同源关系）
+"backend/infra/config.py" = ["E402"]
+# 评级枚举 I–IV 是领域语义（NB/T 47013 评级），`I` 不算歧义命名
+"backend/domain/dto.py" = ["E741"]

@@ -347,7 +347,10 @@ def _report_disclaimer(standard_id: str) -> str:
 
     与后端判定器共用 disclaimer_for，保证 API / PDF / 报告一致。
     """
-    from backend.domain.standards.tables.loader import disclaimer_for, load_standard_tables
+    from backend.domain.standards.tables.loader import (
+        disclaimer_for,
+        load_standard_tables,
+    )
 
     if standard_id:
         try:

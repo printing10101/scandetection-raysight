@@ -25,3 +25,4 @@ node_modules/
 python_embed/
 dist/
 *.pt
+.venv-backend/

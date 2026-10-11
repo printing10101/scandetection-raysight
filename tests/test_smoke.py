@@ -10,16 +10,12 @@ from __future__ import annotations
 
 import io
 import struct
-import time
 import zlib
 
 import pytest
 from fastapi.testclient import TestClient
 
 from backend.app.main import app
-
-# 检测器就绪态：starting → trained_yolo / onnx（模型加载失败的降级态见 /health 文档）
-READY_DETECTORS = ("trained_yolo", "onnx")
 
 
 @pytest.fixture(scope="module")

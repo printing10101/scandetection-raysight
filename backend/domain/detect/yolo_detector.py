@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import replace
 from typing import Any
 
 import cv2
@@ -37,6 +38,12 @@ from backend.domain.detect.uncertainty import (
     estimate_uncertainty,
 )
 from backend.domain.dto import BBox, DefectClass, DefectShape, Detection
+
+# 越界框过滤（2026-10-12）：letterbox 画布 padding 区的幻觉检出与纠偏坐标回映
+# 会产生大部分面积落在图像外的框（实测过曝翻拍片 73 个 66×596 条带 y=-442、
+# 12 个气孔框 y<-14）。检出框与图像有效交集占比低于该阈值即丢弃，否则裁剪
+# 到图像边界——图外部分既无法量化也无法在报告上定位，保留只会虚增计数。
+OOB_MIN_INTERSECT = 0.4
 
 _LOG = logging.getLogger("scandetection.detector")
 
@@ -150,8 +157,38 @@ class YoloDetector:
         # 的瓦片（扫描留白/灯箱背景不含缺陷）；None/空 = 全网格（历史行为）。
         tile = self._effective_tile(image)
         if tile is not None:
-            return self._infer_tiled(image, conf, iou, class_conf, tile, roi=roi)
-        return self._infer_single(image, conf, iou, class_conf)
+            dets = self._infer_tiled(image, conf, iou, class_conf, tile, roi=roi)
+        else:
+            dets = self._infer_single(image, conf, iou, class_conf)
+        return self._filter_out_of_bounds(dets, image.shape[:2])
+
+    @staticmethod
+    def _filter_out_of_bounds(dets: list[Detection], hw: tuple[int, int]) -> list[Detection]:
+        """裁剪/丢弃与图像有效交集不足的越界框（见 OOB_MIN_INTERSECT 注释）。
+
+        与图像交集 ≥ OOB_MIN_INTERSECT 的框裁剪到边界（边缘缺陷保住图内部分）；
+        交集不足的整框丢弃（letterbox padding 区幻觉、坐标回映越界）。
+        """
+        h, w = hw
+        out: list[Detection] = []
+        for d in dets:
+            x1 = max(0.0, d.bbox.x)
+            y1 = max(0.0, d.bbox.y)
+            x2 = min(float(w), d.bbox.x + d.bbox.w)
+            y2 = min(float(h), d.bbox.y + d.bbox.h)
+            inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+            area = max(d.bbox.w, 0.0) * max(d.bbox.h, 0.0)
+            if area <= 0 or inter / area < OOB_MIN_INTERSECT:
+                continue
+            if (
+                x1 != d.bbox.x
+                or y1 != d.bbox.y
+                or x2 != d.bbox.x + d.bbox.w
+                or y2 != d.bbox.y + d.bbox.h
+            ):
+                d = replace(d, bbox=BBox(x=x1, y=y1, w=x2 - x1, h=y2 - y1))
+            out.append(d)
+        return out
 
     def _infer_single(
         self,

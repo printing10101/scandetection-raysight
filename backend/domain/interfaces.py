@@ -28,9 +28,20 @@ class DefectDetector(Protocol):
     """缺陷检测器（模型无关，）。"""
 
     def load(self, model_uri: str, backend: str = "onnx") -> None: ...
+
     def infer(
-        self, image: np.ndarray, conf: float, iou: float, class_conf: dict[int, float] | None = None
+        self,
+        image: np.ndarray,
+        conf: float,
+        iou: float,
+        class_conf: dict[int, float] | None = None,
+        *,
+        roi: list[tuple[float, float, float, float]] | None = None,
     ) -> list[Detection]: ...
+    # 契约演进（非破坏性，2026-10-10）：infer 新增 keyword-only 可选参数 roi
+    # （有效区域 [(x,y,w,h)]，图像坐标）。仅分块推理实现消费（瓦片限区跳过
+    # 有效区外瓦片）；不传/None = 全网格，历史调用方行为不变。所有实现均须
+    # 接受该参数（不支持的实现忽略之），保持调用方签名一致。
 
 
 @runtime_checkable

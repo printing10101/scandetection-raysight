@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from backend.domain.density import check_density
-from backend.domain.detect.calibration import expected_calibration_error
+from backend.evaluation.calibration import expected_calibration_error
 
 
 def test_ece_perfectly_calibrated() -> None:

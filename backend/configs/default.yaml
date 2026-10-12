@@ -17,7 +17,7 @@ model:
   # 瀵掓绾?MLU / DCU锛堥鐣欏啓娉曪紝闇€瀵瑰簲鍘傚晢 onnxruntime 鍒嗗彂鐗堬紝鏈湡鏈洪獙璇侊級:
   #   ["MLUExecutionProvider", "CPUExecutionProvider"] / ["DCUExecutionProvider", ...]
   # 鍚?provider 渚濊禆鐨勮繍琛屾椂搴撻』闅忛儴缃插寘鍒嗗彂锛屽彲鐢ㄦ€т互鍘傚晢鏂囨。涓哄噯锛堟湭鐪熸満楠岃瘉锛夈€?
-  providers: [CPUExecutionProvider]
+  providers: [DmlExecutionProvider, CPUExecutionProvider]  # DML=DirectML GPU（RTX 3080 实测 8K 底片 10.0s→1.6s，输出与 CPU 张量级一致）；无 GPU 环境自动回落 CPU
   # S-17 杩愯鏈熸ā鍨嬪洖閫€锛氳繛缁帹鐞嗗紓甯歌揪鍒伴槇鍊?鈫?鑷姩鍥為€€涓婁竴绋冲畾鐗堟湰 + 鍛婅/瀹¤
   infer_failure_threshold: 3
   auto_rollback: true
@@ -139,6 +139,29 @@ preprocess:
   morph_k_close: 3
   gamma: 1.0  # 璇锋眰鏈紶 gamma 鏃剁殑缂虹渷鍊硷紙1.0 = 璺宠繃浼介┈鏍℃锛?
   enabled: true  # run_inspection 涓槸鍚﹀簲鐢ㄩ檷鍣?澧炲己锛堝叧闂垯瀵瑰師濮?gray 鎺ㄧ悊锛?
+repair:  # 影像质量自动修复（解析前宽容度扩展；domain/preprocess/repair.py）
+  enabled: true
+  overexposed_sat_gray: 250   # 饱和灰阶下限（>= 此值计入过曝面积）
+  overexposed_frac: 0.30      # 过曝触发占比
+  overexposed_unrecoverable_frac: 0.60  # 超过 = 不可修复（高亮信息丢失）
+  underexposed_dark_gray: 8   # 暗部灰阶上限（<= 此值计入欠曝面积）
+  underexposed_frac: 0.40     # 欠曝触发占比
+  underexposed_unrecoverable_frac: 0.75  # 超过 = 不可修复（暗部信息丢失）
+  mean_lo: 60.0               # 均值在 [mean_lo, mean_hi] 内不做伽马（正常影像不乱校正）
+  mean_hi: 200.0
+  low_contrast_spread: 20.0   # p1-p99 灰阶跨度低于此值 -> 分位数拉伸
+  blur_gradient_min: 0.9      # 平均梯度低于此值判模糊 -> 锐化
+  blur_unrecoverable: 0.25    # 梯度低于此值 = 不可修复（无边缘信息）
+  noise_sigma_max: 12.0       # MSCN 噪声 sigma 超过此值 -> 保边去噪
+  tilt_min_deg: 0.6           # 倾斜触发阈值（度）
+  tilt_max_deg: 15.0          # 自动纠偏安全上限（超过 = 不可修复）
+  border_uniform_std: 2.0     # 均匀边框判定（行/列灰阶 std <= 此值视为边框）
+  border_trim_max_frac: 0.10  # 每侧最大裁除比例（占该维度）
+  border_trim_min_px: 8
+  gamma_min: 0.35             # 自动伽马夹紧区间
+  gamma_max: 2.8
+  denoise_bilateral_d: 9
+  sharpen_amount: 0.6         # 非锐化掩模强度
 quality:
   w_noise: 0.25
   w_sharp: 0.20
@@ -147,7 +170,7 @@ quality:
   w_uniform: 0.10
   w_artifact: 0.10
   min_score: 70.0           # RQI 闂ㄩ檺锛?鈥?00锛夛紝浣庝簬鍒や笉鍚堟牸锛堝凡鎸夌湡瀹炲簳鐗囨爣瀹氾級
-  block_on_quality: true    # True=涓嶅悎鏍奸樆鏂瘎鐗囷紱False=浠呭憡璀?need_review
+  block_on_quality: false  # 2026-10-12 放宽: RQI<70 不再阻断评片, 降级为告警+need_review 人工复核(极端环境差底片)
   noise_good: 4.0           # 鍣０蟽 鈮?姝ゅ€兼弧鍒?
   noise_bad: 14.0           # 鍣０蟽 鈮?姝ゅ€?0 鍒?
   sharp_good: 1.5           # 骞冲潎姊害骞呭€兼弧鍒嗛槇鍊硷紙鐪熷疄搴曠墖瀹炴祴 ~0.7鈥?.7锛屽師 18 涓ラ噸鍋忛珮锛?
@@ -159,9 +182,9 @@ quality:
   dust_min_area: 10
   dust_max_count: 400
   # 涓夌被纭棬绂侊紙鍙嶈瘉娴嬭瘯鍚庤ˉ寮猴紱浠讳竴瑙﹀彂鍗冲垽涓嶅悎鏍硷紝涓嶆壈鍔ㄥ凡鏍囧畾 RQI锛?
-  blur_lap_bad: 30.0         # Laplacian 鏂瑰樊浣庝簬姝ゅ€煎垽澶辩劍/妯＄硦锛堢湡瀹炲簳鐗囧疄娴?鈮?5锛?
-  exposure_entropy_bad: 0.62 # 鐩存柟鍥剧喌(褰掍竴鍖?浣庝簬姝ゅ€煎垽杩?娆犳洕锛堢湡瀹炲簳鐗囧疄娴?鈮?.73锛?
-  stain_smooth_bad: 0.15     # 骞虫粦寮傚父鏂戝潡鍗犳瘮楂樹簬姝ゅ€煎垽姹℃笉锛堢湡瀹炲簳鐗囧疄娴?鈮?.14锛?
+  blur_lap_bad: 20.0         # 2026-10-12 放宽：30.0→20.0（真实底片实测 ≥45，20 仍高于差底片误放线；触发仍判不合格）
+  exposure_entropy_bad: 0.55  # 2026-10-12 放宽: 0.62->0.55 (真实底片实测>=0.73, 触发仍判不合格)
+  stain_smooth_bad: 0.25  # 2026-10-12 放宽: 0.15->0.25 (真实底片实测<=0.14, 触发仍判不合格)
 detect:
   kind: trained_yolo  # 妫€娴嬪櫒绉嶇被锛堟敞鍐岃〃閿級锛歵rained_yolo=YOLO 璁粌妯″瀷锛宐aseline_blob=杩為€氬煙鍩虹嚎
   quantifier_kind: mask  # 閲忓寲鍣ㄧ绫伙紙娉ㄥ唽琛ㄩ敭锛夛細mask=鎺╄啘绮句慨(M4b)锛宐box=鍖呭洿鐩掕繎浼?M4a)
@@ -194,7 +217,7 @@ detect:
   # 闃堝€煎師鏍锋帹鐞嗭紱recall_first=鏁翠綋鏀惧锛堝垵绛?澶嶆牳鍏滃簳锛屾紡妫€浠ｄ环楂樼殑鍦烘櫙锛夛紱
   # precision_first=鏁翠綋鏀剁揣锛堢粓瀹″畾绾э紝鍘嬭鎶ョ渷澶嶆牳浜哄姏锛夈€傚疄鐜颁负瀵?
   # infer_conf/class_conf 缁熶竴缂╂斁锛堢被闂寸浉瀵瑰叧绯讳繚鎸?ADR-010 涓嶅彉锛夈€?
-  mode: balanced
+  mode: recall_first  # 2026-10-12 用户授权放宽：balanced→recall_first，置信度整体×recall_conf_scale(0.5) 放宽召回，适应极端环境差底片（漏检代价高的场景；宁多报交人工复核）
   recall_conf_scale: 0.5      # recall_first 缂╂斁绯绘暟锛?1 鏀惧锛?
   precision_conf_scale: 1.8   # precision_first 缂╂斁绯绘暟锛?1 鏀剁揣锛?
   # 鍗板瓧鍖鸿妫€杩囨护锛氱湡瀹炲簳鐗囩殑缂栧彿/鏃ユ湡閾呭瓧鏄瑕佽妫€婧愶紙瀹炴祴鐪熷疄搴曠墖
@@ -211,6 +234,9 @@ detect:
   tile_max_count: 400     # 瓒呭ぇ搴曠墖瓒呮鐡︾墖鏁版椂鎸?1.5脳 鏀惧ぇ鐡︾墖锛堝钩婊戦檷绾э紝涓嶅け鎺ц€楁椂锛?
   tile_merge_iou: 0.3     # 璺ㄧ摝鐗囧悎骞?NMS 鐨?IoU锛堟瘮鎺ㄧ悊 NMS 瀹芥澗锛氱浉閭荤摝鐗囧洖褰掓
                           # 涓嶅畬鍏ㄩ噸鍚堬紝鍙?0.3 闃插悓缂洪櫡鍚堝苟澶辫触鎴愬弻妫€锛涙寜绫荤嫭绔嬪悎骞讹級
+  tile_roi_enabled: true  # 瓦片限区：胶片核心域外瓦片跳过（胶片占幅>=95%或胶片检测不可用时自动全网格）
+  cache_enabled: true     # 推理结果缓存：内容sha256+模型/参数指纹为键，重复底片跳过模型前向
+  cache_maxsize: 32       # 缓存条目上限（LRU；每条含该图全部检出框，内存占用可控）
 mask_refine:
   enabled: true               # False=閫€鍖栦负鍖呭洿鐩掕繎浼硷紙涓?BBoxQuantifier 绛変环锛?
   blur_k: 5                   # ROI 楂樻柉骞虫粦鏍革紙濂囨暟锛?
@@ -232,10 +258,15 @@ standard:
 review:
   kappa_threshold: 0.8  # Cohen's 魏 楂樺害涓€鑷撮槇鍊硷紙搂15.3锛夛紱浣庝簬鍒欏崌绾т徊瑁?
 gate:  # 搴曠墖鍚堟牸鎬ч棬绂佽ˉ鍏咃紙DB50/T 1807-2025 搂5 鎵弿鍙傛暟锛岃瘎鐗囩‖鍓嶇疆锛?
+  # 2026-10-12 用户需求开启：门禁不合格（黑度/IQI 等）不再 409 阻断，留档后
+  # 出「无法评价」报告（首页顶部红字标注 + 具体原因，无级别 + 强制人工复核）。
+  # 改回 false 即恢复"拦截并提示重拍"的从严语义。
+  fail_report: true
   min_dpi: 600        # 鎵弿鍒嗚鲸鐜囦笅闄愶紱DICOM 鎸?PixelSpacing 鎺ㄧ畻
   require_dpi: false  # dpi 鏃犳硶纭畾鏃讹細true=浠庝弗鎷︽埅锛沠alse=鏀捐骞跺憡璀︾暀妗?
   min_bit_depth: 16   # 浣嶆繁纭棬绂佷笅闄愶紙8bit 搴曠墖鐏板害绮惧害涓嶈冻锛?
-  allow_8bit: false   # true=8bit 闄嶇骇鏀捐锛堝憡璀︾暀妗ｏ級锛沠alse=纭嫤鎴?
+  allow_8bit: true   # 2026-10-10 用户授权开启：8bit 影像降级放行（告警留档）   # true=8bit 闄嶇骇鏀捐锛堝憡璀︾暀妗ｏ級锛沠alse=纭嫤鎴?
+  advisory_8bit: true   # 2026-10-12 用户需求(识别+评判8bit): 8bit低精度影像黑度/IQI降级告警，RQI质量门禁反转硬拦(降级不降质); false=恢复8bit严格门禁
   rejects_dir: data/rejects  # 涓嶅悎鏍煎簳鐗囩暀妗ｇ洰褰曪紙瀵嗘枃褰掓。锛?
 observability:
   log_format: text             # text=浜虹被鍙锛堟湰鍦伴粯璁わ級锛沯son=缁撴瀯鍖栧崟琛屾棩蹇楋紙鍙娴嬫帴鍏ワ級

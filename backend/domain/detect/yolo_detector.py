@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import cv2
@@ -49,6 +50,8 @@ class YoloDetector:
         self._onnx_input: str | None = None
         self._onnx_shape = (640, 640)
         self._yolo_model = None
+        # 当前加载的权重标识（缓存键成分：模型切换后缓存自然失效）
+        self.model_uri: str | None = None
         # S-04 推理后端可插拔：ONNX Runtime 执行提供者清单（由 get_detector/
         # Registry 从 config.model.providers 注入）；None = 默认 CPU 不变。
         self.providers: list[str] | None = None
@@ -85,6 +88,7 @@ class YoloDetector:
 
     def load(self, model_uri: str, backend: str = "onnx") -> None:
         self._backend = backend
+        self.model_uri = model_uri
         if backend in ("torch", "yolo"):
             self._load_torch(model_uri)
         else:
@@ -134,15 +138,19 @@ class YoloDetector:
         conf: float,
         iou: float,
         class_conf: dict[int, float] | None = None,
+        *,
+        roi: list[tuple[float, float, float, float]] | None = None,
     ) -> list[Detection]:
         # 空/退化输入（0 尺寸）直接返回空结果，避免 letterbox 缩放中的除零
         # （r = min(nw/w, nh/h)）与下游张量形状错误，把"坏图"变成一次安全空检出。
         if image is None or image.size == 0:
             return []
         # Tiling：配置开启且最长边超触发阈值时按瓦片推理（小图整图路径不受影响）。
+        # roi：有效区域列表 [(x,y,w,h)]（图像坐标）——分块时跳过与有效区零交集
+        # 的瓦片（扫描留白/灯箱背景不含缺陷）；None/空 = 全网格（历史行为）。
         tile = self._effective_tile(image)
         if tile is not None:
-            return self._infer_tiled(image, conf, iou, class_conf, tile)
+            return self._infer_tiled(image, conf, iou, class_conf, tile, roi=roi)
         return self._infer_single(image, conf, iou, class_conf)
 
     def _infer_single(
@@ -212,6 +220,8 @@ class YoloDetector:
         iou: float,
         class_conf: dict[int, float] | None,
         tile: int,
+        *,
+        roi: list[tuple[float, float, float, float]] | None = None,
     ) -> list[Detection]:
         """分块推理：瓦片内单独 letterbox（小缺陷保留原生分辨率）→ 坐标平移回
         全图 → 跨瓦片 NMS 合并重叠区重复检出。
@@ -221,22 +231,82 @@ class YoloDetector:
         各自都是不可检的局部特征）；检出仅保留中心落在核心区的部分——扩展区
         只提供"看得全"，归属仍按核心区划分，避免与邻瓦片重复计数。
 
-        代价：推理次数 ≈ 瓦片数（tile_size=1280 的 8K 底片约 64 次）；收益：
-        整图 letterbox 到 640 时 8K→640 的 ~12 倍缩放对小尺寸缺陷（细裂纹、
-        小气孔）是分辨率天花板，分块后单瓦片内缩放仅 ~2 倍。
+        ROI 限区（性能）：roi 给定时**打包网格**——瓦片只铺在各有效矩形内
+        （步距与全图网格一致，末块贴矩形边收口），有效区（胶片域）外的留白/
+        灯箱背景不再产生瓦片。覆盖性：每个矩形的打包网格完整覆盖该矩形（含
+        贴边收尾），缺陷不会因限区漏检；打包瓦片数 ≥ 全图网格时（矩形近满幅，
+        打包无收益）自动回退全网格。安全兜底：限区后瓦片数为 0 时回退全网格
+        并告警——绝不让限区把"该有检出"变成"静默零检出"。
+
+        代价：推理次数 ≈ 瓦片数（tile_size=1280 的 8K 底片约 64 次；限区后按
+        胶片占幅比例下降）；收益：整图 letterbox 到 640 时 8K→640 的 ~12 倍
+        缩放对小尺寸缺陷（细裂纹、小气孔）是分辨率天花板，分块后单瓦片内
+        缩放仅 ~2 倍。
         """
         h, w = image.shape[:2]
         ov = min(max(self.tile_overlap, 0.0), 0.9)
         pad = max(0, int(tile * ov / 2))
+        # ROI 规整为 (x1,y1,x2,y2) 并裁剪到图内；图外/零面积矩形丢弃，
+        # 全部无效则视为未限区（全网格）。
+        roi_rects: list[tuple[float, float, float, float]] = []
+        for r in roi or []:
+            rx1 = min(max(float(r[0]), 0.0), float(w))
+            ry1 = min(max(float(r[1]), 0.0), float(h))
+            rx2 = min(max(float(r[0]) + float(r[2]), 0.0), float(w))
+            ry2 = min(max(float(r[1]) + float(r[3]), 0.0), float(h))
+            if rx2 > rx1 and ry2 > ry1:
+                roi_rects.append((rx1, ry1, rx2, ry2))
+
+        def _packed_origins(roi_rects) -> list[tuple[int, int]]:
+            """各有效矩形内打包瓦片原点（去重升序）；覆盖性由 _grid_origins 保证。"""
+            pts: set[tuple[int, int]] = set()
+            for rx1, ry1, rx2, ry2 in roi_rects:
+                rw, rh = rx2 - rx1, ry2 - ry1
+                for oy in self._grid_origins(int(rh), tile, ov):
+                    for ox in self._grid_origins(int(rw), tile, ov):
+                        pts.add((min(int(ry1) + oy, max(0, h - 1)), min(int(rx1) + ox, max(0, w - 1))))
+            return sorted(pts)
+
+        if roi_rects:
+            origins = _packed_origins(roi_rects)
+            full_n = self._tile_count(h, w, tile, ov)
+            if len(origins) >= full_n:
+                # 打包不省（矩形近满幅，打包反而引入贴边额外瓦片）→ 全网格。
+                origins = [
+                    (y0, x0)
+                    for y0 in self._grid_origins(h, tile, ov)
+                    for x0 in self._grid_origins(w, tile, ov)
+                ]
+        else:
+            origins = [
+                (y0, x0)
+                for y0 in self._grid_origins(h, tile, ov)
+                for x0 in self._grid_origins(w, tile, ov)
+            ]
+        if not origins and roi_rects:
+            # 安全兜底：限区把全部瓦片滤空（roi 退化/坐标系错位）→ 回退全网格。
+            _LOG.warning("tiling: ROI 限区滤空全部瓦片（roi=%s），回退全网格推理", roi_rects)
+            origins = [
+                (y0, x0)
+                for y0 in self._grid_origins(h, tile, ov)
+                for x0 in self._grid_origins(w, tile, ov)
+            ]
+
         all_dets: list[Detection] = []
-        for y0 in self._grid_origins(h, tile, ov):
-            for x0 in self._grid_origins(w, tile, ov):
-                th = min(tile, h - y0)
-                tw = min(tile, w - x0)
-                y0p, x0p = max(0, y0 - pad), max(0, x0 - pad)
-                y1p, x1p = min(h, y0 + th + pad), min(w, x0 + tw + pad)
-                tile_img = image[y0p:y1p, x0p:x1p]
-                for d in self._infer_single(tile_img, conf, iou, class_conf):
+        n_tiles = 0
+        t_fwd = 0.0  # 模型前向累计耗时（性能观测：瓦片数 × 单次前向是主要成本）
+        t_all = time.perf_counter()
+        for y0, x0 in origins:
+            th = min(tile, h - y0)
+            tw = min(tile, w - x0)
+            y0p, x0p = max(0, y0 - pad), max(0, x0 - pad)
+            y1p, x1p = min(h, y0 + th + pad), min(w, x0 + tw + pad)
+            tile_img = image[y0p:y1p, x0p:x1p]
+            n_tiles += 1
+            _t0 = time.perf_counter()
+            tile_dets = self._infer_single(tile_img, conf, iou, class_conf)
+            t_fwd += time.perf_counter() - _t0
+            for d in tile_dets:
                     bx = d.bbox.x + x0p  # 平移回全图坐标系
                     by = d.bbox.y + y0p
                     cx, cy = bx + d.bbox.w / 2, by + d.bbox.h / 2
@@ -254,6 +324,19 @@ class YoloDetector:
                             deep_hole=d.deep_hole,
                         )
                     )
+        _LOG.info(
+            "tiling infer: image=%dx%d tile=%d tiles=%d full_grid=%d roi_rects=%d "
+            "forward=%.2fs wall=%.2fs raw_dets=%d",
+            w,
+            h,
+            tile,
+            n_tiles,
+            self._tile_count(h, w, tile, ov),
+            len(roi_rects),
+            t_fwd,
+            time.perf_counter() - t_all,
+            len(all_dets),
+        )
         if not all_dets:
             return []
         # 跨瓦片 NMS：重叠区同一缺陷被相邻瓦片各检一次 → 合并为一条。

@@ -106,6 +106,29 @@ preprocess:
   morph_k_close: int              # 闭运算核
   gamma: float                    # 缺省伽马（1.0 = 不做伽马校正）
   enabled: bool                  # run_inspection 中是否应用降噪+增强
+repair:                           # 影像质量自动修复（解析前宽容度扩展）
+  enabled: bool                   # 是否在解析入口应用自动修复
+  overexposed_sat_gray: int       # 饱和灰阶下限（计入过曝面积）
+  overexposed_frac: float         # 过曝触发占比
+  overexposed_unrecoverable_frac: float  # 过曝不可修复上限
+  underexposed_dark_gray: int     # 暗部灰阶上限（计入欠曝面积）
+  underexposed_frac: float        # 欠曝触发占比
+  underexposed_unrecoverable_frac: float  # 欠曝不可修复上限
+  mean_lo: float                  # 均值区间下限（区间内不做伽马）
+  mean_hi: float                  # 均值区间上限（区间内不做伽马）
+  low_contrast_spread: float      # p1–p99 跨度下限（低于则拉伸）
+  blur_gradient_min: float        # 平均梯度模糊阈值（低于则锐化）
+  blur_unrecoverable: float       # 梯度不可修复硬下限
+  noise_sigma_max: float          # 噪声 σ 上限（超过则去噪）
+  tilt_min_deg: float             # 倾斜触发阈值（度）
+  tilt_max_deg: float             # 自动纠偏安全上限（度）
+  border_uniform_std: float       # 均匀边框判定 std 阈值
+  border_trim_max_frac: float     # 每侧最大裁除比例
+  border_trim_min_px: int         # 最小裁除像素数
+  gamma_min: float                # 自动伽马下限
+  gamma_max: float                # 自动伽马上限
+  denoise_bilateral_d: int        # 去噪双边滤波直径
+  sharpen_amount: float           # 锐化强度
 quality:
   w_noise: float                  # 子分权重（噪声）
   w_sharp: float                  # 子分权重（锐度）
@@ -156,6 +179,9 @@ detect:
   tile_trigger_side: int          # 最长边超过此值才分块（小图整图推理不受影响）
   tile_max_count: int             # 单图瓦片数上限；超出按 1.5× 放大瓦片（平滑降级控耗时）
   tile_merge_iou: float           # 跨瓦片合并 NMS 的 IoU（按类独立合并，比推理 NMS 宽松）
+  tile_roi_enabled: bool          # 瓦片限区：胶片核心域外瓦片跳过（自动回退条件见 default.yaml）
+  cache_enabled: bool             # 推理结果缓存（LRU，键=内容sha256+模型/参数指纹；load 即全清）
+  cache_maxsize: int              # 缓存条目上限
 mask_refine:
   enabled: bool                  # False=退化为包围盒近似（与 BBoxQuantifier 等价）
   blur_k: int                    # ROI 高斯平滑核（奇数）
@@ -178,6 +204,8 @@ gate:                             # 底片合格性门禁补充（DB50/T 1807-20
   require_dpi: bool               # dpi 无法确定时：true=拦截 | false=放行并告警留档
   min_bit_depth: int              # 位深硬门禁下限
   allow_8bit: bool                # true=8bit 降级放行（告警留档）| false=硬拦截
+  advisory_8bit: bool             # true=8bit 低精度影像黑度/IQI 降级告警（RQI 反转硬拦）| false=严格门禁
+  fail_report: bool               # 门禁不合格处置：true=出「无法评价」报告（红字标注原因）| false=409 阻断
   rejects_dir: str                # 不合格底片留档目录（密文归档）
 observability:
   log_format: str                 # text=人类可读 | json=结构化单行日志（可观测）

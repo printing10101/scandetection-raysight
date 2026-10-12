@@ -20,11 +20,14 @@ from pydantic import BaseModel
 from backend.app.dependencies import Registry, get_registry
 from backend.app.routers._common import staged_upload
 from backend.domain.detect.thresholds import resolve_class_conf
+from backend.domain.errors import IQIFailError
 from backend.domain.film_region import (
     FilmRegionCfg,
     detect_film_region_trusted,
     film_background_fill,
 )
+from backend.domain.preprocess.repair import RepairCfg as DomainRepairCfg
+from backend.domain.preprocess.repair import auto_repair
 from backend.domain.quantify import MaskRefineCfg as DomainMaskRefineCfg
 from backend.domain.quantify import (
     clock_position,
@@ -146,6 +149,27 @@ def _detect_sync(
     weld_cy: float | None = None,
 ) -> DetectResponse:
     gray, meta = load_image(tmp_path)
+    # 影像质量自动修复（解析前宽容度扩展，与评片链路 run_inspection 同口径）：
+    # 过曝/欠曝/低对比/模糊/噪点/倾斜/裁边自动检测并校正；超限项直接给出
+    # 明确失败提示（409），不让不可解析的影像产出误导性检出。
+    # 几何修复（纠偏/裁边）仅限无原始密度数组的影像（DICOM 16bit 跳过）。
+    rp_cfg = reg.config.repair
+    repair_warnings: list[str] = []
+    if rp_cfg.enabled:
+        rep = auto_repair(
+            gray,
+            DomainRepairCfg(**rp_cfg.model_dump(exclude={"enabled"})),
+            allow_geometry=meta.density_array is None,
+            allow_tonal=meta.density_array is None,
+        )
+        if rep.unrepaired:
+            raise IQIFailError("影像质量超限，自动修复失败：" + "；".join(rep.unrepaired))
+        if rep.actions:
+            gray = rep.image
+            note = "影像自动修复：" + "、".join(rep.actions)
+            if rep.geometry_applied:
+                note += "（标注图基于校正后影像）"
+            repair_warnings.append(note)
     dc = reg.config.detect
     pp_cfg = reg.config.preprocess
     # 与全链路一致：先分割胶片区并把区外背景填充为胶片中位灰阶（灯箱亮背景/
@@ -170,7 +194,18 @@ def _detect_sync(
         pp = reg.preprocessor
         enhanced = pp.enhance(pp.denoise(enhanced), pp_cfg.gamma)
     spacing, spacing_known = resolve_spacing(pixel_spacing_mm, meta.pixel_spacing_mm)
-    detections = reg.detector.infer(enhanced, conf=conf_v, iou=iou_v, class_conf=class_conf_v)
+    # 瓦片限区（与评片链路 run_inspection 同口径）：胶片核心域外瓦片跳过。
+    infer_roi: list[tuple[float, float, float, float]] | None = None
+    if (
+        dc.tile_roi_enabled
+        and film is not None
+        and film.area_frac < 0.95
+        and (film.w < enhanced.shape[1] or film.h < enhanced.shape[0])
+    ):
+        infer_roi = [(float(film.x), float(film.y), float(film.w), float(film.h))]
+    detections = reg.detector.infer(
+        enhanced, conf=conf_v, iou=iou_v, class_conf=class_conf_v, roi=infer_roi
+    )
     # 印字区误检过滤（与评片链路同口径）：印字 OCR 命中时屏蔽其外扩区域内的
     # 检出，防止预览界面把编号/日期铅字当缺陷展示给评片员。框经
     # read_stamp_aligned 映射回整图坐标，与检测框同系。屏蔽不静默——
@@ -244,6 +279,7 @@ def _detect_sync(
         )
     # 标注图叠加在原始灰阶上（真实观感），使用精修后的框。
     warnings: list[str] = []
+    warnings.extend(repair_warnings)
     if stamp_masked:
         warnings.append(f"已屏蔽印字区误检 {stamp_masked} 个（印字/铅字文本框外扩匹配）")
     return DetectResponse(

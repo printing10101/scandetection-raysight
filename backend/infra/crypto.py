@@ -33,9 +33,11 @@ GF(2^128) 乘法表，gmssl 未实现；故以 SM4-CTR + HMAC-SM3（encrypt-then
 - 对接商密硬件（Pkcs11Provider）后，SM4/SM2 密钥改由硬件模块托管生成并
   保存在硬件内（禁止导出），软件侧仅持句柄，主密钥不再参与数据密钥派生。
 
-性能说明：gmssl 为纯 Python 实现，SM4-CTR 吞吐约 100~200 KB/s（本机实测
-4KB 约 26ms），SM2 签名约 10ms/次。适合影像副本、报告等落盘数据的一次性
-静态加密；大文件或高并发场景请对接商密密码卡/加速卡（Pkcs11Provider）。
+性能说明：SM4-CTR / SM3 / HMAC-SM3 默认走 cryptography(OpenSSL) 的 C 实现
+（探测失败自动回退 gmssl 纯 Python；两条路径输出逐字节一致，存量密文互解
+不变）。gmssl 纯 Python 路径吞吐约 100~200 KB/s（本机实测 4KB 约 26ms），
+SM2 签名约 10ms/次（纯 Python，仅报告签名等低频场景）。大文件或高并发场景
+建议仍对接商密密码卡/加速卡（Pkcs11Provider）。
 
 **仍不提供"随机临时密钥"**：进程内随机、重启即丢的密钥会让密文永久不可解，
 属于静默的数据丢失。默认模式的本地密钥文件是**持久**的（首启生成一次、
@@ -80,6 +82,29 @@ _KDF_SM2 = b"sd-kdf-sm2"
 _AES_NONCE_BYTES = 12  # SDC1 GCM nonce（历史格式常量，不可改）
 # 流式加密的单块读取量：16 的倍数（保持 CTR 块对齐），1 MiB 兼顾内存与系统调用开销
 _STREAM_CHUNK_BYTES = 1 << 20
+
+
+# --- C 加速后端探测（2026-10-10 性能修复）---------------------------------
+# gmssl 纯 Python 的 SM4-CTR 实测吞吐仅 ~23 KB/s（7.8MB 底片加解密 340s+），
+# 是"评定请求超时"事故的根因。cryptography(OpenSSL) 自带 SM4/SM3 的 C 实现，
+# 且已随包分发——优先使用；探测失败（OpenSSL 构建无 SM3/SM4）自动回退
+# gmssl 纯 Python 路径。C 路径与纯 Python 路径输出逐字节一致：
+# - SM4-CTR：同一密钥 + 同一 128bit 大端递增计数器 → 同一密钥流；
+# - HMAC-SM3：RFC 2104 结构与哈希函数均相同。
+# 正确性由 tests 的等值锚定与既有密文互解回归保证。
+@lru_cache(maxsize=1)
+def _fast_sm_ok() -> bool:
+    """探测 cryptography(OpenSSL) 是否可用 SM4-CTR 与 SM3 的 C 实现。"""
+    try:
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+        Cipher(algorithms.SM4(bytes(16)), modes.CTR(bytes(16)))  # 探测 SM4-CTR
+        hashes.SM3()  # 探测 SM3
+        return True
+    except Exception:  # noqa: BLE001 - 任何探测失败一律回退纯 Python
+        _LOG.info("cryptography 无 SM4/SM3 C 实现，国密运算回退 gmssl 纯 Python 路径")
+        return False
 
 
 class CryptoKeyError(ValueError):
@@ -217,17 +242,28 @@ def _load_or_create_local_key() -> bytes:
 
 
 def sm3_hex(data: bytes) -> str:
-    """SM3 摘要（64 hex）。国密哈希统一入口（审计链、KDF）。"""
+    """SM3 摘要（64 hex）。国密哈希统一入口（审计链、KDF）。
+
+    优先 cryptography(OpenSSL) C 实现（大文件哈希从 ~MB/s 级提速至 GB/s 级），
+    与 gmssl 纯 Python 输出逐字节一致（同一算法标准）；探测失败回退 gmssl。
+    """
+    if _fast_sm_ok() and data:
+        from cryptography.hazmat.primitives import hashes
+
+        h = hashes.Hash(hashes.SM3())
+        h.update(data)
+        return h.finalize().hex()
     return sm3.sm3_hash(func.bytes_to_list(data))
 
 
 class IncrementalSm3:
     """增量 SM3 哈希器（update/hexdigest 接口）。
 
-    gmssl 仅提供一次性 sm3_hash 与压缩函数 sm3_cf，无流式 API；压缩结构为
-    标准 Merkle–Damgård：V_{i+1} = sm3_cf(V_i, B_i)，填充规则与 gmssl.sm3_hash
-    完全一致（0x80 + 零填充至 56 mod 64 + 8 字节大端比特长）。本模块流式
-    HMAC 与大文件分块哈希共用，正确性由与 sm3_hex 的等值测试锚定。
+    默认走 cryptography(OpenSSL) C 实现（增量 update 语义一致，备份/大文件
+    分块哈希不再受纯 Python 吞吐限制）；探测失败回退 gmssl 压缩函数：
+    压缩结构为标准 Merkle–Damgård：V_{i+1} = sm3_cf(V_i, B_i)，填充规则与
+    gmssl.sm3_hash 完全一致（0x80 + 零填充至 56 mod 64 + 8 字节大端比特长）。
+    本模块流式 HMAC 与大文件分块哈希共用，正确性由与 sm3_hex 的等值测试锚定。
     """
 
     _IV: ClassVar[list[int]] = [
@@ -242,11 +278,20 @@ class IncrementalSm3:
     ]
 
     def __init__(self) -> None:
+        self._fast = None
+        if _fast_sm_ok():
+            from cryptography.hazmat.primitives import hashes
+
+            self._fast = hashes.Hash(hashes.SM3())
+            return
         self._v = list(self._IV)
         self._buf = bytearray()
         self._absorbed = 0  # 已压缩进 _v 的字节数（不含 _buf）
 
     def update(self, data: bytes) -> None:
+        if self._fast is not None:
+            self._fast.update(data)
+            return
         self._buf += data
         while len(self._buf) >= 64:
             self._v = sm3.sm3_cf(self._v, func.bytes_to_list(bytes(self._buf[:64])))
@@ -254,6 +299,8 @@ class IncrementalSm3:
             self._absorbed += 64
 
     def hexdigest(self) -> str:
+        if self._fast is not None:
+            return self._fast.finalize().hex()
         total = self._absorbed + len(self._buf)
         tail = bytes(self._buf) + b"\x80"
         tail += b"\x00" * ((56 - (total + 1) % 64) % 64)
@@ -265,9 +312,20 @@ class IncrementalSm3:
 
 
 class _HmacSm3:
-    """增量 HMAC-SM3（RFC 2104 结构），输出与 _hmac_sm3 一次性版本逐字节一致。"""
+    """增量 HMAC-SM3（RFC 2104 结构），输出与 _hmac_sm3 一次性版本逐字节一致。
+
+    默认走 cryptography(OpenSSL) 的 HMAC C 实现（SM3 哈希 + RFC2104 结构与
+    纯 Python 路径等价，增量 update 语义一致）；探测失败回退纯 Python 实现。
+    """
 
     def __init__(self, key: bytes) -> None:
+        self._fast = None
+        if _fast_sm_ok():
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives import hmac as _chmac
+
+            self._fast = _chmac.HMAC(key, hashes.SM3())
+            return
         block = 64
         k = key if len(key) <= block else bytes.fromhex(sm3_hex(key))
         k = k + b"\x00" * (block - len(k))
@@ -279,9 +337,15 @@ class _HmacSm3:
         self._outer.update(outer)
 
     def update(self, data: bytes) -> None:
+        if self._fast is not None:
+            self._fast.update(data)
+            return
         self._inner.update(data)
 
     def hexdigest(self) -> str:
+        if self._fast is not None:
+            # copy() 使 hexdigest 可重复调用（与纯 Python 路径语义一致，finalize 会消费上下文）
+            return self._fast.copy().finalize().hex()
         self._outer.update(bytes.fromhex(self._inner.hexdigest()))
         return self._outer.hexdigest()
 
@@ -365,6 +429,7 @@ class SoftSmProvider:
         self._master = bytes(master_key)
         # 数据密钥：SM4-128 与 HMAC 密钥（域分离派生，互不相关）
         sm4_key = _kdf(self._master, _KDF_SM4, 16)
+        self._sm4_key = sm4_key  # C 加速路径用（与 gmssl 实例同一密钥）
         self._mac_key = _kdf(self._master, _KDF_MAC, _MAC_BYTES)
         # SM4 单块加密器：CTR 只用其单块原语 one_round（gmssl 的 crypt_ecb
         # 自带 PKCS7 填充，不适合流式 CTR）
@@ -410,9 +475,19 @@ class SoftSmProvider:
         """SM4-CTR 异或：从全局第 ``block_index`` 个 16 字节块起。
 
         计数器 = counter_base + block_index + 块内序号（大端 128bit 递增）。
-        XOR 对合，加解密同函数。gmssl 纯 Python 单块约 1.6μs/字节量级，
-        大数据量耗时见模块 docstring 性能说明。
+        XOR 对合，加解密同函数。
+
+        性能（2026-10-10 修复）：默认走 cryptography(OpenSSL) 的 SM4-CTR C
+        实现——初始计数器直接寻址到目标块，密钥流与 gmssl 纯 Python 实现
+        逐字节一致（同一计数器语义），7.8MB 实测从 ~340s 降至 <0.1s；
+        探测失败回退 gmssl 单块循环（约 100~200 KB/s，见模块 docstring）。
         """
+        if _fast_sm_ok() and data:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+            ctr0 = ((counter_base + block_index) & ((1 << 128) - 1)).to_bytes(16, "big")
+            enc = Cipher(algorithms.SM4(self._sm4_key), modes.CTR(ctr0)).encryptor()
+            return enc.update(data) + enc.finalize()
         out = bytearray()
         idx = block_index
         for off in range(0, len(data), 16):

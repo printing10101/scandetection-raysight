@@ -19,12 +19,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from backend.app.auth import Principal, get_principal
-from backend.app.dependencies import (
-    Registry,
-    _resolve_path,
-    get_operator_name,
-    get_registry,
-)
+from backend.app.dependencies import Registry, _resolve_path, get_operator_name, get_registry
 from backend.app.llm_narrative import facts_from_report, generate
 from backend.app.pipelines import InspectionPipeline
 from backend.app.routers._common import parse_roi, staged_upload

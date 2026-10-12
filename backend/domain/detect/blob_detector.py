@@ -52,8 +52,14 @@ class BlobDetector:
         conf: float = 0.3,
         iou: float = 0.5,
         class_conf: dict[int, float] | None = None,
+        *,
+        roi: list[tuple[float, float, float, float]] | None = None,
     ) -> list[Detection]:
-        """预处理 → 自适应二值化（相对背景）→ 连通域 → 缺陷候选框。"""
+        """预处理 → 自适应二值化（相对背景）→ 连通域 → 缺陷候选框。
+
+        roi（瓦片限区参数，与 YoloDetector 同契约）：基线为整图单次处理，
+        不分块，故忽略该参数（仅接受以保持调用方签名一致）。
+        """
         enhanced = self.preprocessor.enhance(self.preprocessor.denoise(image), 1.0)
         blur = cv2.GaussianBlur(enhanced, (5, 5), 0)
         # 阈值在归一化 [0,1] 量纲下计算，使 noise_sigma_ratio 与 abs_threshold

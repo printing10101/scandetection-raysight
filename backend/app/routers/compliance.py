@@ -164,10 +164,7 @@ def hardening_check(
     空集）、TLS/传输、文件权限。分级 high/medium/low，高危项附修复建议。
     """
     from backend.app.main import app as current_app
-    from backend.infra.compliance.hardening import (
-        run_hardening_check,
-        write_hardening_report,
-    )
+    from backend.infra.compliance.hardening import run_hardening_check, write_hardening_report
 
     report = run_hardening_check(reg, current_app, get_principal)
     files = write_hardening_report(report, _compliance_dir(reg))

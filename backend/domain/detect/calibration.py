@@ -81,6 +81,7 @@ def grid_search_temperature(
     返回 {best_temp, ece_before, ece_after, n}；样本不足（< MIN_PAIRS_PER_CLASS）
     时返回 best_temp=1.0 并标记 skipped——诚实不拟合优于小样本过拟合。
     """
+    from backend.evaluation.calibration import expected_calibration_error
 
     n = len(confidences)
     if n == 0 or n != len(correct):
@@ -134,76 +135,3 @@ def parse_calibration_payload(payload: object, expected_model_id: str) -> dict[i
             return None
         temps[cid] = t
     return temps or None
-
-
-# ---------------------------------------------------------------------------
-# ECE（期望校准误差）——从 evaluation 下沉至 domain（2026-10-12 分层治理）：
-# 这是纯数学的领域函数（§15.4 门禁口径），domain 与 evaluation 共用，
-# 依 domain 纯净度契约由 domain 持有、evaluation 反向引入。
-# ---------------------------------------------------------------------------
-
-DEFAULT_N_BINS = 15
-DEFAULT_MAX_ECE = 0.05
-
-
-def expected_calibration_error(
-    confidences: list[float],
-    correct: list[bool],
-    *,
-    n_bins: int = DEFAULT_N_BINS,
-    max_ece: float = DEFAULT_MAX_ECE,
-) -> dict[str, Any]:
-    """ECE 主计算（等宽分桶）+ 阈值判定。
-
-    返回 ece、分桶明细（可靠性图数据）、最大校准误差（MCE）与 verdict。
-    """
-    if len(confidences) != len(correct):
-        raise ValueError("confidences 与 correct 长度必须一致")
-    n = len(confidences)
-    bins: list[dict[str, float]] = [
-        {"lo": i / n_bins, "hi": (i + 1) / n_bins, "n": 0, "conf_sum": 0.0, "n_correct": 0}
-        for i in range(n_bins)
-    ]
-    for c, ok in zip(confidences, correct):
-        b = min(n_bins - 1, max(0, int(c * n_bins)))
-        bins[b]["n"] += 1
-        bins[b]["conf_sum"] += float(c)
-        bins[b]["n_correct"] += 1 if ok else 0
-
-    ece = 0.0
-    mce = 0.0
-    table: list[dict[str, float]] = []
-    for b in bins:
-        cnt = int(b["n"])
-        if cnt:
-            # 先用原始值算 gap，再在展示层 round——用已 round 的行值算 ECE
-            # 会引入最高 1e-4 的舍入噪声。
-            conf_mean = b["conf_sum"] / cnt
-            accuracy = b["n_correct"] / cnt
-            gap = abs(accuracy - conf_mean)
-            ece += cnt / n * gap
-            mce = max(mce, gap)
-        else:
-            conf_mean = 0.0
-            accuracy = 0.0
-            gap = 0.0
-        row: dict[str, float] = {
-            "lo": round(b["lo"], 4),
-            "hi": round(b["hi"], 4),
-            "n": cnt,
-            "conf_mean": round(conf_mean, 4),
-            "accuracy": round(accuracy, 4),
-            "gap": round(gap, 4),
-        }
-        table.append(row)
-
-    ece = round(ece, 4)
-    return {
-        "n_samples": n,
-        "n_bins": n_bins,
-        "ece": ece,
-        "mce": round(mce, 4),
-        "bins": table,
-        "thresholds": {"max_ece": max_ece},
-        "verdict": {"passed": n > 0 and ece <= max_ece},
-    }

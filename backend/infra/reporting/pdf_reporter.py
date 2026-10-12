@@ -190,7 +190,9 @@ class PdfReporter:
         if gray is None:
             gray = _read_gray(image["path"])
         orig_bytes = _encode_png(gray)
-        graph_bytes = _annotate_png(gray, defects)
+        # 「无法评价」报告：不带缺陷标注图（不可评价的检出不构成示意依据），
+        # 附图页仅保留送检底片原图；检测数据仍在库中供复核界面查看。
+        graph_bytes = None if not content.evaluable else _annotate_png(gray, defects)
         pdf_path = self._out / f"{image_id}.pdf"
         # 追溯二维码（G01）：编码 report_id + 指纹前缀；生成失败 fail-soft
         # 不阻断出片（二维码是增强能力，报告是主业务）。
@@ -347,10 +349,7 @@ def _report_disclaimer(standard_id: str) -> str:
 
     与后端判定器共用 disclaimer_for，保证 API / PDF / 报告一致。
     """
-    from backend.domain.standards.tables.loader import (
-        disclaimer_for,
-        load_standard_tables,
-    )
+    from backend.domain.standards.tables.loader import disclaimer_for, load_standard_tables
 
     if standard_id:
         try:
@@ -704,15 +703,38 @@ def _render(
     )
 
 
+def _unevaluable_reason(c) -> str:
+    """门禁不合格降级出片的「无法评价」标注文本（含具体原因）。
+
+    数据源约定：pipeline 在 gate.fail_report / force 路径把
+    "无法评价（影像质量门禁未通过）：<原因>"置于 basis 首条；渲染层按前缀
+    识别取用。旧数据/无标记时回退通用文案（不伪造具体原因）。
+    """
+    if getattr(c, "evaluable", True):
+        return ""
+    for b in c.basis:
+        if b.startswith("无法评价"):
+            return str(b)
+    return "无法评价（影像质量校验未通过）"
+
+
 def _summary_flow(c, styles: dict[str, ParagraphStyle]) -> list[Flowable]:
-    """第1页《射线检测报告》：大标题 + NO: 编号行 + 汇总表。"""
-    return [
-        Paragraph("射 线 检 测 报 告", styles["title"]),
-        Spacer(1, 3 * mm),
-        Paragraph(f"NO:{c.report_id or c.image_id}", styles["no_line"]),
-        Spacer(1, 1.5 * mm),
-        _summary_table(c, styles),
-    ]
+    """第1页《射线检测报告》：[无法评价红字横幅] + 大标题 + NO: 编号行 + 汇总表。"""
+    flow: list[Flowable] = []
+    reason = _unevaluable_reason(c)
+    if reason:
+        flow.append(Paragraph(reason, styles["banner"]))
+        flow.append(Spacer(1, 2.5 * mm))
+    flow.extend(
+        [
+            Paragraph("射 线 检 测 报 告", styles["title"]),
+            Spacer(1, 3 * mm),
+            Paragraph(f"NO:{c.report_id or c.image_id}", styles["no_line"]),
+            Spacer(1, 1.5 * mm),
+            _summary_table(c, styles),
+        ]
+    )
+    return flow
 
 
 def _summary_table(c, styles: dict[str, ParagraphStyle]) -> Table:
@@ -938,7 +960,8 @@ def _conclusion_flowables(c, styles: dict[str, ParagraphStyle]) -> list:
     part = c.workpiece_no or f"影像 {c.image_id[-8:].upper()}"
     std = c.standard_ref or "验收标准"
     if not c.evaluable:
-        first = "1、影像质量校验未通过（IQI/黑度不达标），本片不可评片，需人工复核处理。"
+        # 门禁不合格降级出片：结论首条写明无法评价 + 具体原因（与首页横幅同源）
+        first = f"1、{_unevaluable_reason(c)}，本片不可评片，不输出评定级别，需人工复核处理。"
     elif c.joint_level:
         grade = _grade_rank(c.joint_level)
         accept = _grade_rank(meta.get("accept_level"))
@@ -1083,6 +1106,10 @@ def _eval_row_values(c) -> list[list[str]]:
         ]
         for d in c.defects
     ]
+    if not c.evaluable:
+        # 「无法评价」报告：检测数据不进评定表（不可评价的检出不构成评定依据），
+        # 仅保留黑度/丝号实测与预填信息，评定依据详见首页红字标注。
+        return [[weld, film, dens, wire, "—", "—", "—", "无法评价"]]
     if not rows:
         rows.append([weld, film, dens, wire, "未检出缺陷", "", _roman_plain(c.joint_level), remark])
     return rows
@@ -1305,6 +1332,16 @@ def _make_styles(font: str) -> dict[str, ParagraphStyle]:
             wordWrap="CJK",
         ),
         "fine": ParagraphStyle("rt_fine", fontName=font, fontSize=8, leading=12, wordWrap="CJK"),
+        # 「无法评价」红字横幅：与报告正文同字体同字号（宋体 12pt），仅红色区分
+        "banner": ParagraphStyle(
+            "rt_banner",
+            fontName=font,
+            fontSize=12,
+            leading=17,
+            alignment=TA_CENTER,
+            textColor=colors.red,
+            wordWrap="CJK",
+        ),
     }
 
 

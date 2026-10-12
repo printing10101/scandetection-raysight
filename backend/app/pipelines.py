@@ -17,6 +17,8 @@ import time
 import uuid
 from pathlib import Path
 
+import cv2
+
 from backend.app.dependencies import Registry
 from backend.domain.active_learning import (
     export_training_labels,
@@ -25,14 +27,7 @@ from backend.domain.active_learning import (
 )
 from backend.domain.density import check_density, estimate_density
 from backend.domain.detect.thresholds import resolve_class_conf
-from backend.domain.dto import (
-    BBox,
-    DefectClass,
-    DefectShape,
-    Detection,
-    ImageMeta,
-    Modality,
-)
+from backend.domain.dto import BBox, DefectClass, DefectShape, Detection, ImageMeta, Modality
 from backend.domain.errors import GradingAmbiguousError, IQIFailError
 from backend.domain.film_region import FilmRegionCfg as DomainFilmRegionCfg
 from backend.domain.film_region import detect_film_region_trusted, film_background_fill
@@ -40,13 +35,13 @@ from backend.domain.gate_adapters import iqi_cfg_from_settings, pseudo_cfg_from_
 from backend.domain.iqi import enrich_grade, verify_iqi
 from backend.domain.preprocess.metrics import QualityCfg as DomainQualityCfg
 from backend.domain.preprocess.metrics import assess_quality
+from backend.domain.preprocess.repair import RepairCfg as DomainRepairCfg
+from backend.domain.preprocess.repair import auto_repair
 from backend.domain.pseudo_defect import screen_pseudo_defects
 from backend.domain.quantify import MaskRefineCfg, get_quantifier
 from backend.domain.recommend import recommend
 from backend.domain.review import ReviewDecision, ReviewRole, resolve_review
-from backend.domain.spacing import (
-    resolve_spacing as _resolve_spacing,  # 单一真源（§T8/§6）
-)
+from backend.domain.spacing import resolve_spacing as _resolve_spacing  # 单一真源（§T8/§6）
 from backend.domain.stamp import (
     StampCfg,
     extract_film_no,
@@ -227,39 +222,107 @@ class InspectionPipeline:
 
         # 1. 影像加载（infra）
         gray, meta = load_image(image_path)
+        gray_orig = gray  # 原始帧引用：黑度须基于原始像素（修复不得污染绝对量）
+        t_load = time.perf_counter()
 
+        # 1.2 影像质量自动修复（解析前宽容度扩展）：过曝/欠曝/低对比/模糊/
+        # 噪点/倾斜/裁边自动检测并校正，动作全部留痕。几何修复（纠偏/裁边）
+        # 仅在无原始密度数组（8bit 通用图）且未提供 IQI ROI 时允许——几何
+        # 变化时落库副本会用修复后帧重渲染，保证缺陷框与报告附图同坐标系。
+        # 超出可修复范围（信息不可恢复）→ force=False 直接给出明确失败提示。
+        repair_warnings: list[str] = []
+        repair_info: dict = {}
+        repair_geometry = False
+        rp_cfg = reg.config.repair
+        if rp_cfg.enabled:
+            rep = auto_repair(
+                gray,
+                DomainRepairCfg(**rp_cfg.model_dump(exclude={"enabled"})),
+                allow_geometry=(meta.density_array is None and iqi_roi is None),
+                allow_tonal=meta.density_array is None,
+            )
+            if rep.unrepaired:
+                msg = "影像质量超限，自动修复失败：" + "；".join(rep.unrepaired)
+                _LOG.warning("repair unrecoverable image_id=%s: %s", image_id, msg)
+                if not force:
+                    raise IQIFailError(msg)
+                repair_warnings.append(msg + "（force 出片：结果不构成评定依据）")
+            else:
+                gray = rep.image
+                repair_geometry = rep.geometry_applied
+                repair_info = {
+                    "issues": rep.issues,
+                    "actions": rep.actions,
+                    "deskew_angle_deg": rep.deskew_angle,
+                    "crop_offset": list(rep.crop_offset) if rep.crop_offset else None,
+                    "metrics": {k: round(v, 3) for k, v in rep.metrics.items()},
+                }
+                if rep.actions:
+                    note = "影像自动修复：" + "、".join(rep.actions)
+                    if rep.geometry_applied:
+                        note += "（落库副本为校正后影像）"
+                    repair_warnings.append(note)
+                _LOG.info(
+                    "repair image_id=%s issues=%s actions=%s geometry=%s",
+                    image_id,
+                    rep.issues,
+                    rep.actions,
+                    rep.geometry_applied,
+                )
+
+        t_repair = time.perf_counter()
         # 1.5 底片区域分割（翻拍影像前置）：黑度按胶片掩膜计算，IQI/伪缺陷/
         # 质量门禁在胶片区上评估，检测时屏蔽胶片区外背景（坐标系不变）。
         # 翻拍影像（相机拍灯箱，8bit、无原始密度数组）绝对黑度不可测且 IQI
         # 识别不可靠 → photo_mode 下门禁按 density.photo_policy 处置。
         fr = reg.config.film_region
-        film = (
-            detect_film_region_trusted(
-                gray,
-                DomainFilmRegionCfg(
-                    min_area_frac=fr.min_area_frac,
-                    max_photo_area_frac=fr.max_photo_area_frac,
-                    surround_bright_gray=fr.surround_bright_gray,
-                    surround_min_frac=fr.surround_min_frac,
-                ),
-            )
-            if fr.enabled
-            else None
+        fr_domain = DomainFilmRegionCfg(
+            min_area_frac=fr.min_area_frac,
+            max_photo_area_frac=fr.max_photo_area_frac,
+            surround_bright_gray=fr.surround_bright_gray,
+            surround_min_frac=fr.surround_min_frac,
+        )
+        film = detect_film_region_trusted(gray, fr_domain) if fr.enabled else None
+        # 翻拍判定须用原始帧：修复（伽马压暗亮背景/裁除边框）可能消除翻拍
+        # 特征，导致 photo_mode 丢失、门禁从"告警降级"退化成硬阻断（回归）。
+        film_for_photo = (
+            detect_film_region_trusted(gray_orig, fr_domain)
+            if (fr.enabled and gray is not gray_orig)
+            else film
         )
         photo_mode = bool(
-            film is not None
-            and film.is_photo
+            film_for_photo is not None
+            and film_for_photo.is_photo
             and meta.bit_depth == 8
             and meta.density_array is None
         )
+        # 8bit 低精度影像降级（2026-10-12 用户需求：识别+评判 8bit，且保质量）：
+        # 8bit 量化的黑度上限 2.41 使 [2.0,4.5] 绝对门禁结构性失效、细丝 IQI
+        # 不可靠 → 黑度/IQI 门禁对「8bit 且无原始密度数组」影像一律降级为告警
+        # （advisory_8bit 可关）。RQI 质量门禁（含三类硬否决）反转为硬门禁，
+        # 成为该类影像唯一放行依据——降级不降质。
+        precision_advisory = bool(
+            reg.config.gate.advisory_8bit
+            and meta.bit_depth is not None
+            and meta.bit_depth <= 8
+            and meta.density_array is None
+        )
+        advisory_mode = photo_mode or precision_advisory
         eval_gray = (
             gray[film.y : film.y + film.h, film.x : film.x + film.w] if film is not None else gray
         )
 
+        t_film = time.perf_counter()
         # 2. 影像质量校验：黑度 + IQI（复用 领域逻辑）
         # 黑度须基于原始存储灰阶 + 位深，避免显示用的 min-max 拉伸破坏绝对光学密度；
-        # 翻拍影像限定胶片掩膜，排除灯箱亮背景对平均灰阶的稀释。
-        density_src = meta.density_array if meta.density_array is not None else gray
+        # 自动修复同理：像素级修复（伽马/拉伸）不得污染黑度——无原始密度数组时
+        # 退回原始帧；仅几何修复（纠偏/裁边）场景下原始帧与胶片掩膜不同几何，
+        # 此时黑度本身已是翻拍/降级语义（advisory），用修复后帧保持掩膜一致。
+        density_src = (
+            meta.density_array
+            if meta.density_array is not None
+            else (gray if repair_geometry else gray_orig)
+        )
         density = float(
             estimate_density(
                 density_src,
@@ -281,16 +344,22 @@ class InspectionPipeline:
         # 质量度量门禁：在胶片区上评估（反映底片本身质量，排除翻拍边框/灯箱背景）。
         q_cfg = reg.config.quality
         quality = assess_quality(eval_gray, DomainQualityCfg(**q_cfg.model_dump()))
-        quality_fail_block = bool(q_cfg.block_on_quality and not quality.passed)
+        # 8bit 降级影像：质量门禁反转回硬门禁（黑度/IQI 已告警化，RQI 是唯一
+        # 放行依据，"降级不降质"）；其余影像维持 block_on_quality 配置语义。
+        quality_fail_block = bool(
+            (q_cfg.block_on_quality or precision_advisory) and not quality.passed
+        )
         quality_warn = bool((not quality.passed) and not q_cfg.block_on_quality)
         # 扫描参数门禁（§5）：dpi 与位深。dpi 无法确定时按 gate.require_dpi
         # 处置（默认放行+告警留档）；8bit 底片默认硬拦截（allow_8bit 可降级放行）。
         dpi = _estimate_dpi(meta)
         dpi_ok, dpi_reason = _check_dpi(dpi, reg.config.gate)
         bit_depth_ok, bit_depth_reason = _check_bit_depth(meta.bit_depth, reg.config.gate)
+        # 8bit 降级影像（advisory_mode）：黑度/IQI 绝对量在该位深下不可测，
+        # 不构成阻断；质量/伪缺陷/dpi/位深门禁照常生效。
         evaluable = bool(
-            density_ok
-            and iqi.passed
+            (density_ok or advisory_mode)
+            and (iqi.passed or advisory_mode)
             and pd.passed
             and not quality_fail_block
             and dpi_ok
@@ -299,6 +368,12 @@ class InspectionPipeline:
         # 翻拍影像降级：photo_policy=warn 时黑度/IQI/质量门禁不阻断，
         # 转为告警 + 强制人工复核（绝对黑度不可测，未验证 ≠ 不合格）。
         photo_advisory = bool(photo_mode and reg.config.density.photo_policy == "warn")
+        # 门禁降级放行的告警（require_dpi=false / allow_8bit=true / fail_report 路径）：
+        # 不阻断评片，但必须在结果与日志中留痕，避免"未验证"被静默当作合格。
+        gate_warnings: list[str] = []
+        # fail_report 路径（gate.fail_report=true）：门禁不合格留档后降级出片，
+        # 此列表首条作为报告首页「无法评价」红字横幅与具体原因（随 basis 进指纹）。
+        gate_fail_basis: list[str] = []
         reasons: list[str] = []
         if not evaluable:
             if not density_ok:
@@ -317,7 +392,7 @@ class InspectionPipeline:
                 reasons.append(bit_depth_reason)
             if not force and not photo_advisory:
                 # 不合格底片留档（E-05）：拦截发生在原图落盘之前，此前被拒
-                # 底片无任何记录；先归档（密文副本+台账+审计）再阻断。
+                # 底片无任何记录；先归档（密文副本+台账+审计）再处置。
                 self._archive_gate_reject(
                     image_path=image_path,
                     image_id=image_id,
@@ -326,10 +401,19 @@ class InspectionPipeline:
                     bit_depth=meta.bit_depth,
                     operator=actor,
                 )
-                raise IQIFailError("底片质量不合格，阻断评片并提示重拍：" + "；".join(reasons))
-        # 门禁降级放行的告警（require_dpi=false / allow_8bit=true 路径）：
-        # 不阻断评片，但必须在结果与日志中留痕，避免"未验证"被静默当作合格。
-        gate_warnings: list[str] = []
+                if not reg.config.gate.fail_report:
+                    raise IQIFailError(
+                        "底片质量不合格，阻断评片并提示重拍：" + "；".join(reasons)
+                    )
+                # fail_report 降级（2026-10-12 用户需求）：不阻断，出「无法评价」
+                # 报告——无级别 + 强制人工复核，原因随 basis 进报告（可追溯）。
+                gate_warnings.append(
+                    "影像质量门禁未通过，已按配置降级为「无法评价」报告（不构成评定依据）"
+                )
+                gate_fail_basis.append("无法评价（影像质量门禁未通过）：" + "；".join(reasons))
+            elif force:
+                # force 出片路径同样带上具体原因（此前只有笼统的"不可评"）。
+                gate_fail_basis.append("无法评价（影像质量门禁未通过）：" + "；".join(reasons))
         # 标定注入留痕（G23）：像素标定来自设备档案或设备无标定的结论，
         # 评片员须能在结果里看到标定来源/缺失（响应 warnings → 告警面板）。
         if spacing_note:
@@ -355,17 +439,39 @@ class InspectionPipeline:
                 gate_warnings,
             )
         photo_warnings: list[str] = []
-        if photo_mode:
-            photo_warnings.append(
-                f"翻拍影像：绝对黑度不可测（8bit 照片黑度上限 2.41），"
-                f"胶片区估算 D={density:.2f} 仅供参考"
-            )
-            if not evaluable:
+        if advisory_mode:
+            if photo_mode:
                 photo_warnings.append(
-                    "翻拍影像质量门禁未通过（" + "；".join(reasons) + "），已降级为人工复核"
+                    f"翻拍影像：绝对黑度不可测（8bit 照片黑度上限 2.41），"
+                    f"胶片区估算 D={density:.2f} 仅供参考"
+                )
+            else:
+                photo_warnings.append(
+                    f"8bit 低精度影像：绝对黑度/IQI 不可测（8bit 量化上限 2.41），"
+                    f"黑度 D={density:.2f}、IQI {iqi.achieved}/{iqi.required} 仅供参考，"
+                    f"黑度/IQI 门禁已降级为告警"
+                )
+            if not (density_ok and iqi.passed):
+                # reasons 仅在 evaluable=False 时填充；降级放行（evaluable=True）
+                # 时绝对量失败原因在此内联构造，避免空列表产出「（）」。
+                adv_reasons: list[str] = []
+                if not density_ok:
+                    adv_reasons.append(
+                        f"黑度 {density:.2f} 超出 [{reg.config.density.low}, {reg.config.density.high}]"
+                    )
+                if not iqi.passed:
+                    adv_reasons.append(
+                        f"IQI 未达要求（要求 {iqi.required}，实测 {iqi.achieved}）"
+                    )
+                photo_warnings.append(
+                    "8bit 降级：绝对量门禁未通过（"
+                    + "；".join(adv_reasons)
+                    + "），已降级为告警+人工复核"
                 )
             _LOG.warning(
-                "photo-mode advisory image density=%.2f iqi_pass=%s quality_pass=%s",
+                "advisory-mode image photo=%s precision=%s density=%.2f iqi_pass=%s quality_pass=%s",
+                photo_mode,
+                precision_advisory,
                 density,
                 bool(iqi.passed),
                 quality.passed,
@@ -398,6 +504,7 @@ class InspectionPipeline:
                 "clahe_clip": pp_cfg.clahe_clip,
                 "clahe_grid": pp_cfg.clahe_grid,
             }
+        preprocess_params["repair"] = repair_info  # 自动修复留痕落库（问题/动作/度量）
         # 底片印字识别须先于检测：命中印字框供下方 stamp-zone 误检过滤使用
         # （框经 read_stamp_aligned 映射回整图坐标，与检测框同系）；
         # 落库/缺印字复核语义与原 5.5 步完全一致（读数前移不改变任何判定）。
@@ -417,8 +524,36 @@ class InspectionPipeline:
             recall_scale=dc.recall_conf_scale,
             precision_scale=dc.precision_conf_scale,
         )
+        t_infer0 = time.perf_counter()
+        # 瓦片限区（性能）：胶片核心域外的瓦片整块跳过。条件齐备才启用——
+        # 配置开启 + 胶片检测可用 + 胶片占幅 <95%（近满幅时限区无收益，
+        # 避免边缘瓦片过滤引入无谓风险）；其余情形 roi=None = 全网格（历史行为）。
+        infer_roi: list[tuple[float, float, float, float]] | None = None
+        if (
+            dc.tile_roi_enabled
+            and film is not None
+            and film.area_frac < 0.95
+            and (film.w < enhanced.shape[1] or film.h < enhanced.shape[0])
+        ):
+            infer_roi = [(float(film.x), float(film.y), float(film.w), float(film.h))]
         detections = reg.detector.infer(
-            enhanced, conf=infer_conf, iou=dc.infer_iou, class_conf=class_conf_eff
+            enhanced,
+            conf=infer_conf,
+            iou=dc.infer_iou,
+            class_conf=class_conf_eff,
+            roi=infer_roi,
+        )
+        t_infer1 = time.perf_counter()
+        _LOG.info(
+            "stage timings image_id=%s load=%.2fs repair=%.2fs film=%.2fs "
+            "gates=%.2fs infer=%.2fs total=%.2fs",
+            image_id,
+            t_load - t0,
+            t_repair - t_load,
+            t_film - t_repair,
+            t_infer0 - t_film,
+            t_infer1 - t_infer0,
+            t_infer1 - t0,
         )
         # 印字区误检过滤（detect.mask_stamp_zone）：真实底片的编号/日期铅字是
         # 首要误检源（实测 27/27 检出全落印字带）。OCR 读到的全部文本框（含
@@ -474,6 +609,16 @@ class InspectionPipeline:
             if grade_preliminary:
                 basis = [_preliminary_basis(reasons), *basis]
                 need_review = True
+            if precision_advisory and not grade_preliminary:
+                # 8bit 降级评定：级别照常输出（检测/量化基于相对灰度），但强标记
+                # 不构成验收依据——绝对黑度/IQI 未验证，报告与审计均可见。
+                grade_preliminary = True
+                basis = [
+                    "8bit 降级评定：黑度/IQI 绝对量未验证（8bit 量化上限 2.41），"
+                    "级别仅供预筛，不构成验收依据",
+                    *basis,
+                ]
+                need_review = True
         except GradingAmbiguousError as exc:
             grade_preliminary = False
             joint_level = None
@@ -488,6 +633,11 @@ class InspectionPipeline:
             need_review = True
         # 质量门禁未达阈值且非阻断模式（block_on_quality=False）时仅告警，并入人工复核标记。
         need_review = bool(need_review or quality_warn)
+        # 自动修复留痕并入依据与人工复核：修复过的影像不是原始摄取画面，
+        # 修复效果未经原扫描条件验证，不得静默当作合格片出报告。
+        if repair_warnings:
+            basis = [*basis, *repair_warnings]
+            need_review = True
 
         # 5.5 底片印字裁决（read_stamp 已前移到检测前，见第 4 步）：缺印字的
         # 处置分两种语义：
@@ -502,6 +652,11 @@ class InspectionPipeline:
                 *basis,
                 "底片未识别到扫描日期/编号印字（正/镜像均未命中），需人工复核确认底片身份",
             ]
+            need_review = True
+        # fail_report/force 路径：门禁具体原因置于 basis 首条——报告渲染层以
+        # "无法评价"前缀识别并绘制首页红字横幅（进内容指纹，防篡改可追溯）。
+        if gate_fail_basis:
+            basis = [*gate_fail_basis, *basis]
             need_review = True
 
         std_id = standard_id or reg.config.standard.default_id
@@ -527,7 +682,25 @@ class InspectionPipeline:
         # 6. 原图副本落盘（报告缺陷图谱数据源；勿删）+ 落库（一个事务）：
         # 两者紧邻执行，落库失败即回收副本，不留无台账的孤儿文件。
         suffix = image_path.suffix or ".png"
-        saved = self._persist_image(image_path, image_id, suffix)
+        persist_src = image_path
+        if repair_geometry:
+            # 几何修复（纠偏/裁边）改变了坐标系：落库副本用修复后帧重渲染，
+            # 保证 PDF 报告缺陷框 / 复核界面与检测坐标一致。原始上传文件不留
+            # 档——修复动作已在 repair_info 与 warnings 中完整留痕（可审计）。
+            persist_src = (
+                Path(resolve_config_path(reg.config.paths.tmp_dir))
+                / f"{image_id}_repaired.png"
+            )
+            persist_src.parent.mkdir(parents=True, exist_ok=True)
+            if not cv2.imwrite(str(persist_src), gray):
+                _LOG.warning("repair persist render failed image_id=%s, fallback to original", image_id)
+                persist_src = image_path
+        saved = self._persist_image(persist_src, image_id, suffix)
+        if persist_src is not image_path:
+            try:
+                persist_src.unlink(missing_ok=True)
+            except OSError:  # noqa: BLE001 — 临时帧清理失败不影响主链路
+                pass
         image_row = {
             "id": image_id,
             "path": str(saved),

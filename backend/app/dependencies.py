@@ -21,17 +21,9 @@ from backend.domain.errors import ModelUnavailableError
 from backend.domain.grade.registry import get_grader
 from backend.domain.interfaces import DefectDetector, Reporter, StandardGrader
 from backend.domain.preprocess.pipeline import OpencvPreprocessor
-from backend.domain.standards.tables.loader import (
-    load_standard_tables,
-    set_default_table_source,
-)
+from backend.domain.standards.tables.loader import load_standard_tables, set_default_table_source
 from backend.domain.sync import LocalAdapter
-from backend.infra.config import (
-    AppConfig,
-    ensure_runtime_dirs,
-    load_config,
-    resolve_config_path,
-)
+from backend.infra.config import AppConfig, ensure_runtime_dirs, load_config, resolve_config_path
 from backend.infra.model_registry import ModelEntry, ModelRegistry
 from backend.infra.model_store import LocalModelStore
 from backend.infra.paths import resolve_model_uri as _resolve_model_uri
@@ -164,10 +156,12 @@ class ResilientDetector:
         conf: float,
         iou: float,
         class_conf: dict[int, float] | None = None,
+        *,
+        roi=None,
     ):
         try:
             with self._rw.read():
-                dets = self._inner.infer(image, conf, iou, class_conf)
+                dets = self._inner.infer(image, conf, iou, class_conf, roi=roi)
         except Exception:
             with self._counter_lock:
                 self.consecutive_failures += 1
@@ -283,9 +277,7 @@ class Registry:
         if self._gate_reject_store is None:
             with self._lazy_store_lock:
                 if self._gate_reject_store is None:
-                    from backend.evaluation.gate_rejects import (
-                        GateRejectStore as _Store,
-                    )
+                    from backend.evaluation.gate_rejects import GateRejectStore as _Store
 
                     self._gate_reject_store = _Store(str(_resolve_path(self.config.paths.db_path)))
         return self._gate_reject_store
@@ -486,9 +478,20 @@ class Registry:
             return self._wrap_resilient(get_detector("baseline_blob", blob_cfg=self._blob_cfg(dc)))
 
     def _wrap_resilient(self, det: DefectDetector) -> DefectDetector:
-        """S-17：以 ResilientDetector 包装检测器，接通告警/审计/回退回调。"""
+        """S-17：以 ResilientDetector 包装检测器，接通告警/审计/回退回调。
+
+        缓存层（CachedDetector）置于 ResilientDetector 内侧：命中不产生推理
+        异常（不干扰回退计数），load 透传即清缓存（模型热切换/回退后旧结果
+        绝不复用）。
+        """
+        inner: DefectDetector = det
+        dcc = self.config.detect
+        if getattr(dcc, "cache_enabled", False):
+            from backend.domain.detect.cache import CachedDetector
+
+            inner = CachedDetector(det, maxsize=dcc.cache_maxsize)
         return ResilientDetector(
-            det,
+            inner,
             threshold=self.config.model.infer_failure_threshold,
             auto_rollback=self.config.model.auto_rollback,
             on_threshold=self._on_infer_failure_threshold,

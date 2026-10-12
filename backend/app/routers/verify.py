@@ -97,6 +97,15 @@ def _verify_sync(
     photo_mode = bool(
         film is not None and film.is_photo and meta.bit_depth == 8 and meta.density_array is None
     )
+    # 8bit 低精度影像降级（与 run_inspection 的 precision_advisory 同语义）：
+    # 8bit 量化上限 2.41 使绝对黑度/IQI 结构性不可测 → 降级告警，不阻断。
+    precision_advisory = bool(
+        reg.config.gate.advisory_8bit
+        and meta.bit_depth is not None
+        and meta.bit_depth <= 8
+        and meta.density_array is None
+    )
+    advisory_mode = photo_mode or precision_advisory
     eval_gray = (
         gray[film.y : film.y + film.h, film.x : film.x + film.w] if film is not None else gray
     )
@@ -126,11 +135,18 @@ def _verify_sync(
     # 黑度/IQI 门禁不阻断，转为告警 + 人工复核。
     photo_advisory = bool(photo_mode and reg.config.density.photo_policy == "warn")
     warnings: list[str] = []
-    if photo_mode:
-        warnings.append(
-            f"翻拍影像：绝对黑度不可测（8bit 照片黑度上限 2.41），"
-            f"胶片区估算 D={density:.2f} 仅供参考"
-        )
+    if advisory_mode:
+        if photo_mode:
+            warnings.append(
+                f"翻拍影像：绝对黑度不可测（8bit 照片黑度上限 2.41），"
+                f"胶片区估算 D={density:.2f} 仅供参考"
+            )
+        else:
+            warnings.append(
+                f"8bit 低精度影像：绝对黑度/IQI 不可测（8bit 量化上限 2.41），"
+                f"黑度 D={density:.2f}、IQI {iqi.achieved}/{iqi.required} 仅供参考，"
+                f"黑度/IQI 门禁已降级为告警"
+            )
         if not (density_ok and iqi.passed):
             reasons = []
             if not density_ok:
@@ -138,12 +154,12 @@ def _verify_sync(
             if not iqi.passed:
                 reasons.append(f"IQI 未达要求（要求 {iqi.required}，实测 {iqi.achieved}）")
             warnings.append(
-                "翻拍影像质量门禁未通过（" + "；".join(reasons) + "），已降级为人工复核"
+                "8bit 降级：绝对量门禁未通过（" + "；".join(reasons) + "），已降级为告警+人工复核"
             )
 
     # evaluable = 该影像按当前策略能否免阻断进入检测链路：
-    # 翻拍降级时黑度/IQI 不构成阻断（与 run_inspection 的 IQIFailError 语义一致）。
-    if photo_advisory:
+    # 翻拍/8bit 降级时黑度/IQI 不构成阻断（与 run_inspection 语义一致）。
+    if photo_advisory or precision_advisory:
         evaluable = bool(pd.passed)
     else:
         evaluable = bool(density_ok and iqi.passed and pd.passed)

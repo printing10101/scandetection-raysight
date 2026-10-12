@@ -311,6 +311,40 @@ class PseudoDefectCfg(BaseModel):
     block_on_dust: bool = False
 
 
+class RepairCfg(BaseModel):
+    """影像质量自动修复（解析前宽容度扩展；backend/domain/preprocess/repair.py）。
+
+    进入解析流程前自动检测 7 类质量问题（过曝/欠曝/低对比度/模糊/噪点/
+    倾斜/裁剪不当）并应用对应校正；超限项进 unrepaired，由管线抛出明确
+    失败提示（阻断评片并提示重拍）。几何修复（纠偏/裁边）触发时落库副本
+    同步用修复后帧重渲染，保证缺陷框与报告附图同坐标系；DICOM（有原始
+    密度数组）与用户提供 IQI ROI 时自动跳过几何修复。
+    """
+
+    enabled: bool = True
+    overexposed_sat_gray: int = 250
+    overexposed_frac: float = 0.30
+    overexposed_unrecoverable_frac: float = 0.60
+    underexposed_dark_gray: int = 8
+    underexposed_frac: float = 0.40
+    underexposed_unrecoverable_frac: float = 0.75
+    mean_lo: float = 60.0
+    mean_hi: float = 200.0
+    low_contrast_spread: float = 20.0
+    blur_gradient_min: float = 0.9
+    blur_unrecoverable: float = 0.25
+    noise_sigma_max: float = 12.0
+    tilt_min_deg: float = 0.6
+    tilt_max_deg: float = 15.0
+    border_uniform_std: float = 2.0
+    border_trim_max_frac: float = 0.10
+    border_trim_min_px: int = 8
+    gamma_min: float = 0.35
+    gamma_max: float = 2.8
+    denoise_bilateral_d: int = 9
+    sharpen_amount: float = 0.6
+
+
 class PreprocessCfg(BaseModel):
     bilateral_d: int = 9
     bilateral_sigma_color: float = 75.0
@@ -424,6 +458,15 @@ class DetectCfg(BaseModel):
     # 跨瓦片合并 NMS 的 IoU：相邻瓦片对同一缺陷的回归框不完全重合，取比推理
     # NMS（infer_iou）宽松的阈值防"合并失败→双检"；按类独立合并防跨类互吞。
     tile_merge_iou: float = 0.3
+    # 瓦片限区（性能）：胶片区域（film_region 核心域）外的瓦片整块跳过——扫描
+    # 留白/灯箱亮背景不含缺陷，全网格切块浪费前向次数。胶片区占幅 ≥95% 或
+    # 胶片检测不可用时自动退回全网格（行为与历史一致）。开启前已验证：跳过
+    # 的瓦片与胶片区零交集，缺陷框坐标映射不受影响。
+    tile_roi_enabled: bool = True
+    # 推理结果缓存（性能）：内容 sha256 + 模型/参数指纹为键的 LRU，重复底片
+    # 跳过模型前向。inner.load（热切换/回退）即全清，旧模型结果绝不复用。
+    cache_enabled: bool = True
+    cache_maxsize: int = 32
     # 逐类温度校准表（§15.4 置信度校准）：由 training/fit_calibration 拟合产出，
     # 文件内含 model_id 指纹——加载时校验，与当前权重不匹配则静默不启用
     # （绝不让过期校准表污染新权重）。None = 关闭校准。
@@ -482,6 +525,16 @@ class GateCfg(BaseModel):
     require_dpi: bool = False  # dpi 无法确定时：true=拦截（从严），false=放行+告警
     min_bit_depth: int = 16
     allow_8bit: bool = False
+    # 8bit 低精度影像降级通道（2026-10-12 用户需求：识别+评判 8bit，且保质量）：
+    # 8bit 量化的黑度上限 2.41 使 [2.0,4.5] 绝对门禁结构性失效、细丝 IQI 不可靠，
+    # 故对「8bit 且无原始密度数组」影像：黑度/IQI 门禁降级为告警（留档+人工复核），
+    # 同时 RQI 质量门禁（含三类硬否决）反转回硬拦截——降级不降质。
+    # false=恢复 8bit 严格门禁语义（黑度/IQI 不达标即阻断）。
+    advisory_8bit: bool = True
+    # 门禁不合格处置（2026-10-12 用户需求）：true=留档后降级出「无法评价」报告
+    # （首页顶部红字标注 + 具体原因，无级别 + 强制人工复核，不构成评定依据）；
+    # false=维持原语义（409 阻断评片并提示重拍）。两种路径均写 gate_rejects 台账。
+    fail_report: bool = True
     rejects_dir: str = "data/rejects"  # 不合格底片留档目录（密文归档）
 
 
@@ -710,6 +763,7 @@ class AppConfig(BaseSettings):
     iqi: IqiCfg = IqiCfg()
     pseudo_defect: PseudoDefectCfg = PseudoDefectCfg()
     preprocess: PreprocessCfg = PreprocessCfg()
+    repair: RepairCfg = RepairCfg()
     quality: QualityCfg = QualityCfg()
     detect: DetectCfg = DetectCfg()
     mask_refine: MaskRefineCfg = MaskRefineCfg()

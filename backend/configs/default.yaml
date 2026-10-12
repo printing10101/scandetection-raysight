@@ -154,7 +154,7 @@ repair:  # 影像质量自动修复（解析前宽容度扩展；domain/preproce
   blur_unrecoverable: 0.25    # 梯度低于此值 = 不可修复（无边缘信息）
   noise_sigma_max: 12.0       # MSCN 噪声 sigma 超过此值 -> 保边去噪
   tilt_min_deg: 0.6           # 倾斜触发阈值（度）
-  tilt_max_deg: 15.0          # 自动纠偏安全上限（超过 = 不可修复）
+  tilt_max_deg: 30.0          # 自动纠偏安全上限（超过 = 不可修复）；2026-10-12 用户授权放宽：15→30，真实翻拍底片实测 16.3° 被拦，Hough 估计与仿射纠偏在 ±45° 内安全
   border_uniform_std: 2.0     # 均匀边框判定（行/列灰阶 std <= 此值视为边框）
   border_trim_max_frac: 0.10  # 每侧最大裁除比例（占该维度）
   border_trim_min_px: 8

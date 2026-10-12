@@ -335,7 +335,9 @@ class RepairCfg(BaseModel):
     blur_unrecoverable: float = 0.25
     noise_sigma_max: float = 12.0
     tilt_min_deg: float = 0.6
-    tilt_max_deg: float = 15.0
+    # 2026-10-12 放宽：15→30（真实翻拍底片 16.3° 被拦；_estimate_tilt 角度折叠
+    # 与 _deskew 仿射在 ±45° 内均安全，30° 留足余量）
+    tilt_max_deg: float = 30.0
     border_uniform_std: float = 2.0
     border_trim_max_frac: float = 0.10
     border_trim_min_px: int = 8

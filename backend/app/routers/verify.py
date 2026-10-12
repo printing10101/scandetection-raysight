@@ -27,6 +27,8 @@ from backend.domain.film_region import FilmRegionCfg as DomainFilmRegionCfg
 from backend.domain.film_region import detect_film_region
 from backend.domain.gate_adapters import iqi_cfg_from_settings, pseudo_cfg_from_settings
 from backend.domain.iqi import enrich_grade, verify_iqi
+from backend.domain.preprocess.metrics import QualityCfg as DomainQualityCfg
+from backend.domain.preprocess.metrics import assess_quality
 from backend.domain.pseudo_defect import screen_pseudo_defects
 from backend.infra.image_loader import load_image
 
@@ -131,6 +133,14 @@ def _verify_sync(
     pd_domain = pseudo_cfg_from_settings(reg.config.pseudo_defect)
     pd = screen_pseudo_defects(eval_gray, pd_domain)
 
+    # 质量度量（与 run_inspection 对齐）：8bit 降级影像的 RQI 是反转硬门禁，
+    # 预检必须同样判定——否则预检"可评"而管线阻断，前端状态自相矛盾。
+    q_cfg = reg.config.quality
+    quality = assess_quality(eval_gray, DomainQualityCfg(**q_cfg.model_dump()))
+    quality_fail_block = bool(
+        (q_cfg.block_on_quality or precision_advisory) and not quality.passed
+    )
+
     # 翻拍影像降级（与 run_inspection 的 photo_advisory 同语义）：
     # 黑度/IQI 门禁不阻断，转为告警 + 人工复核。
     photo_advisory = bool(photo_mode and reg.config.density.photo_policy == "warn")
@@ -156,13 +166,19 @@ def _verify_sync(
             warnings.append(
                 "8bit 降级：绝对量门禁未通过（" + "；".join(reasons) + "），已降级为告警+人工复核"
             )
+        if quality_fail_block:
+            warnings.append(
+                f"8bit 降级：质量分 RQI={quality.score:.1f} 低于 {q_cfg.min_score:.0f}，"
+                f"管线将阻断评片（8bit 降级不降质，质量门禁硬拦截）"
+            )
 
     # evaluable = 该影像按当前策略能否免阻断进入检测链路：
-    # 翻拍/8bit 降级时黑度/IQI 不构成阻断（与 run_inspection 语义一致）。
+    # 翻拍/8bit 降级时黑度/IQI 不构成阻断（与 run_inspection 语义一致）；
+    # 质量门禁与管线同一表达式（8bit 降级时 RQI 反转硬拦）。
     if photo_advisory or precision_advisory:
-        evaluable = bool(pd.passed)
+        evaluable = bool(pd.passed and not quality_fail_block)
     else:
-        evaluable = bool(density_ok and iqi.passed and pd.passed)
+        evaluable = bool(density_ok and iqi.passed and pd.passed and not quality_fail_block)
 
     return VerifyResponse(
         iqi=IqiOut(
